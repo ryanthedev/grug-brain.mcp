@@ -1,0 +1,13 @@
+{
+  "name": "grug-brain-mcp",
+  "version": "0.1.0",
+  "type": "module",
+  "description": "MCP server for persistent memory. grug remember thing so not forget.",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.12.1"
+  }
+}
