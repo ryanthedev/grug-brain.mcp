@@ -1,7 +1,7 @@
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { z } from "zod";
-import { execFileSync } from "child_process";
+import Database from "better-sqlite3";
 import {
   readdirSync, readFileSync, writeFileSync, existsSync,
   statSync, mkdirSync, unlinkSync,
@@ -85,8 +85,12 @@ function extractFrontmatter(content) {
   return fm;
 }
 
+function extractBody(content) {
+  return content.replace(/^---[\s\S]*?---\n*/, "").trim();
+}
+
 function extractDescription(content) {
-  const body = content.replace(/^---[\s\S]*?---\n*/, "");
+  const body = extractBody(content);
   for (const line of body.split("\n")) {
     const trimmed = line.trim();
     if (!trimmed || trimmed.startsWith("#") || trimmed.startsWith("```")) continue;
@@ -95,67 +99,147 @@ function extractDescription(content) {
   return "";
 }
 
-// --- build index ---
+// --- FTS database ---
 
-function buildIndex(category) {
-  const catDir = join(MEMORY_DIR, category);
-  const files = walkFiles(catDir);
-  if (files.length === 0) {
-    // empty category, write minimal index
-    const out = `# ${category}\n\n(no memories yet)\n`;
-    writeFileSync(join(catDir, "llms.txt"), out, "utf-8");
-    return out;
-  }
+ensureDir(MEMORY_DIR);
+const DB_PATH = join(MEMORY_DIR, ".grug-brain.db");
+const db = new Database(DB_PATH);
+db.pragma("journal_mode = WAL");
 
-  const lines = [`# ${category}`, ""];
-  for (const file of files) {
-    const rel = relative(catDir, file);
-    const content = readFile(file);
-    const fm = content ? extractFrontmatter(content) : {};
-    const desc = content ? extractDescription(content) : "";
-    const title = fm.name || fm.title || basename(file, extname(file));
-    const date = fm.date ? ` (${fm.date})` : "";
-    const proj = fm.project ? ` [${fm.project}]` : "";
-    const descStr = desc ? `: ${desc}` : "";
-    lines.push(`- [${title}](${category}/${rel})${date}${proj}${descStr}`);
-  }
-  lines.push("");
-
-  const out = lines.join("\n");
-  writeFileSync(join(catDir, "llms.txt"), out, "utf-8");
-  return out;
+// schema version check — rebuild if schema changed
+const SCHEMA_VERSION = 2;
+db.exec("CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT)");
+const currentVersion = db.prepare("SELECT value FROM meta WHERE key = 'schema_version'").get();
+if (!currentVersion || parseInt(currentVersion.value) < SCHEMA_VERSION) {
+  db.exec("DROP TABLE IF EXISTS files");
+  db.exec("DROP TABLE IF EXISTS memories_fts");
+  db.prepare("INSERT OR REPLACE INTO meta (key, value) VALUES ('schema_version', ?)").run(String(SCHEMA_VERSION));
 }
+
+db.exec(`
+  CREATE TABLE IF NOT EXISTS files (
+    path TEXT PRIMARY KEY,
+    mtime REAL NOT NULL
+  );
+  CREATE VIRTUAL TABLE IF NOT EXISTS memories_fts USING fts5(
+    path UNINDEXED,
+    category,
+    name,
+    date UNINDEXED,
+    project,
+    description,
+    body,
+    tokenize = 'porter unicode61'
+  );
+`);
+
+const stmtGetFile = db.prepare("SELECT mtime FROM files WHERE path = ?");
+const stmtUpsertFile = db.prepare("INSERT OR REPLACE INTO files (path, mtime) VALUES (?, ?)");
+const stmtDeleteFile = db.prepare("DELETE FROM files WHERE path = ?");
+const stmtAllFiles = db.prepare("SELECT path FROM files");
+
+const stmtInsertFts = db.prepare(
+  "INSERT INTO memories_fts (path, category, name, date, project, description, body) VALUES (?, ?, ?, ?, ?, ?, ?)"
+);
+const stmtDeleteFts = db.prepare("DELETE FROM memories_fts WHERE path = ?");
+const SEARCH_PAGE_SIZE = 20;
+const stmtSearchCount = db.prepare(`
+  SELECT COUNT(*) as total FROM memories_fts WHERE memories_fts MATCH ?
+`);
+const stmtSearch = db.prepare(`
+  SELECT path, category, name, date, project, description,
+         highlight(memories_fts, 5, '>>>', '<<<') as snippet,
+         rank
+  FROM memories_fts
+  WHERE memories_fts MATCH ?
+  ORDER BY rank
+  LIMIT ? OFFSET ?
+`);
+const stmtRecall = db.prepare(`
+  SELECT path, category, name, date, project, description
+  FROM memories_fts
+  ORDER BY category, date DESC
+`);
+const stmtRecallByProject = db.prepare(`
+  SELECT path, category, name, date, project, description
+  FROM memories_fts
+  WHERE project = ?
+  ORDER BY category, date DESC
+`);
+const stmtCategoryCounts = db.prepare(`
+  SELECT category, COUNT(*) as count
+  FROM memories_fts
+  GROUP BY category
+  ORDER BY category
+`);
+
+function indexFile(relPath, fullPath) {
+  const content = readFile(fullPath);
+  if (!content) return;
+  const fm = extractFrontmatter(content);
+  const body = extractBody(content);
+  const desc = extractDescription(content);
+  const category = relPath.split("/")[0];
+
+  stmtDeleteFts.run(relPath);
+  stmtInsertFts.run(relPath, category, fm.name || "", fm.date || "", fm.project || "", desc, body);
+  stmtUpsertFile.run(relPath, statSync(fullPath).mtimeMs);
+}
+
+function removeFromIndex(relPath) {
+  stmtDeleteFts.run(relPath);
+  stmtDeleteFile.run(relPath);
+}
+
+// sync on startup — only re-index changed files
+function syncIndex() {
+  const indexed = new Set(stmtAllFiles.all().map(r => r.path));
+  const onDisk = new Set();
+
+  for (const cat of getCategories()) {
+    for (const fullPath of walkFiles(join(MEMORY_DIR, cat))) {
+      const relPath = relative(MEMORY_DIR, fullPath);
+      onDisk.add(relPath);
+
+      const row = stmtGetFile.get(relPath);
+      const mtime = statSync(fullPath).mtimeMs;
+      if (!row || row.mtime !== mtime) {
+        indexFile(relPath, fullPath);
+      }
+    }
+  }
+
+  for (const path of indexed) {
+    if (!onDisk.has(path)) removeFromIndex(path);
+  }
+}
+
+syncIndex();
 
 // --- search ---
 
-function search(query) {
-  const cats = getCategories();
-  const llmsFiles = cats
-    .map(cat => join(MEMORY_DIR, cat, "llms.txt"))
-    .filter(f => existsSync(f));
+function search(query, page = 1) {
+  const terms = query.trim().split(/\s+/).filter(Boolean);
+  if (terms.length === 0) return { results: [], total: 0 };
 
-  if (llmsFiles.length === 0) return [];
+  const offset = (Math.max(1, page) - 1) * SEARCH_PAGE_SIZE;
+  const ftsQuery = terms.length === 1
+    ? `"${terms[0]}"*`
+    : terms.map(t => `"${t}"*`).join(" OR ");
 
   try {
-    const out = execFileSync("rg", [
-      "--ignore-case", "--line-number", "--no-heading", "-H",
-      query,
-      ...llmsFiles,
-    ], { encoding: "utf-8", timeout: 10000 });
-
-    const results = [];
-    for (const line of out.split("\n")) {
-      if (!line.trim()) continue;
-      // format: /path/to/cat/llms.txt:linenum:match
-      const m = line.match(/^(.+?):(\d+):(.*)/);
-      if (!m) continue;
-      const cat = relative(MEMORY_DIR, m[1]).split("/")[0];
-      results.push({ category: cat, line: parseInt(m[2]), match: m[3].trim() });
+    const { total } = stmtSearchCount.get(ftsQuery);
+    const results = stmtSearch.all(ftsQuery, SEARCH_PAGE_SIZE, offset);
+    return { results, total };
+  } catch {
+    try {
+      const simple = terms.map(t => `"${t}"`).join(" OR ");
+      const { total } = stmtSearchCount.get(simple);
+      const results = stmtSearch.all(simple, SEARCH_PAGE_SIZE, offset);
+      return { results, total };
+    } catch {
+      return `search error — try simpler terms`;
     }
-    return results;
-  } catch (e) {
-    if (e.status === 1) return [];
-    throw e;
   }
 }
 
@@ -167,17 +251,17 @@ const USAGE = `grug-brain — grug remember thing so not forget
 
 actions:
   topics                          list memory categories
-  search   text:"query"           search across all memories
+  search   text:"query"           search across all memories (FTS5 + BM25 ranked)
   read     target:"path"          read a memory file (paginated)
   write    target:"cat" text:"…"  write a memory (name: optional)
   delete   target:"cat/file.md"   delete a memory
-  build    target:"cat"           rebuild llms.txt index
+  recall   project:"name"         dump all indexes (optional project filter)
 
 MEMORY_DIR: ${MEMORY_DIR}`;
 
 const HELP = {
-  search: `search: find memories across all categories
-  text: search query — supports rg regex (required)`,
+  search: `search: find memories across all categories (FTS5 + BM25 ranked)
+  text: search query — natural language or FTS5 syntax (required)`,
   read: `read: read a memory file
   target: path relative to memory dir (required)`,
   write: `write: create or update a memory
@@ -189,8 +273,6 @@ const HELP = {
   otherwise wraps in frontmatter with name/description/type/project fields`,
   delete: `delete: remove a memory and rebuild index
   target: path relative to memory dir, e.g. "feedback/no-summaries.md" (required)`,
-  build: `build: rebuild llms.txt index for a category
-  target: category name (required)`,
 };
 
 // --- dispatch ---
@@ -200,22 +282,27 @@ function dispatch(action, target, text, name, project, page) {
 
   switch (action) {
     case "topics": {
-      const cats = getCategories();
-      if (cats.length === 0) return `no categories yet in ${MEMORY_DIR}\nuse write to create your first memory`;
-      const lines = cats.map(cat => {
-        const files = walkFiles(join(MEMORY_DIR, cat));
-        const hasIndex = existsSync(join(MEMORY_DIR, cat, "llms.txt"));
-        return `  ${cat}  (${files.length} memories${hasIndex ? "" : ", needs build"})`;
-      });
-      return `${cats.length} categories\n\n${lines.join("\n")}`;
+      const rows = stmtCategoryCounts.all();
+      if (rows.length === 0) return `no categories yet in ${MEMORY_DIR}\nuse write to create your first memory`;
+      const lines = rows.map(r => `  ${r.category}  (${r.count} memories)`);
+      return `${rows.length} categories\n\n${lines.join("\n")}`;
     }
 
     case "search": {
       if (!text) return HELP.search;
-      const results = search(text);
+      const result = search(text, page);
+      if (typeof result === "string") return result;
+      const { results, total } = result;
       if (results.length === 0) return `no matches for "${text}"`;
-      const out = results.map(r => `[${r.category}] line ${r.line}: ${r.match}`);
-      return `${results.length} match${results.length === 1 ? "" : "es"} for "${text}"\n\n${out.join("\n")}`;
+      const p = Math.max(1, page || 1);
+      const totalPages = Math.ceil(total / SEARCH_PAGE_SIZE);
+      const out = results.map(r => {
+        const date = r.date ? ` date:${r.date}` : "";
+        const proj = r.project ? ` project:${r.project}` : "";
+        return `${r.path}${date}${proj} category:${r.category}\n  ${r.snippet || r.description}`;
+      });
+      const paging = totalPages > 1 ? `\n--- page ${p}/${totalPages} (${total} total) | page:${p + 1} for more ---` : "";
+      return `${total} match${total === 1 ? "" : "es"} for "${text}"\n\n${out.join("\n")}${paging}`;
     }
 
     case "read": {
@@ -235,10 +322,8 @@ function dispatch(action, target, text, name, project, page) {
       const catDir = join(MEMORY_DIR, slugify(target));
       ensureDir(catDir);
 
-      // determine filename
       let slug = name ? slugify(name) : null;
       if (!slug) {
-        // derive from first meaningful line
         const firstLine = text.replace(/^---[\s\S]*?---\n*/, "")
           .split("\n").find(l => l.trim() && !l.startsWith("#")) || target;
         slug = slugify(firstLine.substring(0, 60));
@@ -246,7 +331,6 @@ function dispatch(action, target, text, name, project, page) {
       const filePath = join(catDir, `${slug}.md`);
       const exists = existsSync(filePath);
 
-      // write content — add frontmatter if not present
       let content = text;
       if (!text.startsWith("---\n")) {
         const projectLine = project ? `\nproject: ${project}` : "";
@@ -254,10 +338,11 @@ function dispatch(action, target, text, name, project, page) {
       }
 
       writeFileSync(filePath, content, "utf-8");
-      buildIndex(slugify(target));
 
-      const rel = relative(MEMORY_DIR, filePath);
-      return `${exists ? "updated" : "created"} ${rel}`;
+      const relPath = relative(MEMORY_DIR, filePath);
+      indexFile(relPath, filePath);
+
+      return `${exists ? "updated" : "created"} ${relPath}`;
     }
 
     case "delete": {
@@ -266,21 +351,52 @@ function dispatch(action, target, text, name, project, page) {
       if (!existsSync(filePath)) return `not found: ${target}`;
 
       unlinkSync(filePath);
-
-      // rebuild index for the category
-      const cat = target.split("/")[0];
-      if (existsSync(join(MEMORY_DIR, cat))) buildIndex(cat);
+      removeFromIndex(target);
 
       return `deleted ${target}`;
     }
 
-    case "build": {
-      if (!target) return HELP.build;
-      const catDir = join(MEMORY_DIR, target);
-      if (!isDir(catDir)) return `category not found: ${target}`;
-      const index = buildIndex(target);
-      const files = walkFiles(catDir);
-      return `rebuilt index (${files.length} files)\n\n${index}`;
+    case "recall": {
+      const rows = project
+        ? stmtRecallByProject.all(project)
+        : stmtRecall.all();
+
+      if (rows.length === 0) return `no memories found${project ? ` for project "${project}"` : ""}`;
+
+      // group by category
+      const groups = new Map();
+      for (const r of rows) {
+        if (!groups.has(r.category)) groups.set(r.category, []);
+        groups.get(r.category).push(r);
+      }
+
+      // full dump to file
+      const fullLines = [];
+      for (const [cat, entries] of groups) {
+        fullLines.push(`# ${cat}\n`);
+        for (const e of entries) {
+          const date = e.date ? ` (${e.date})` : "";
+          const proj = e.project ? ` [${e.project}]` : "";
+          fullLines.push(`- [${e.name || e.path}](${e.path})${date}${proj}: ${e.description}`);
+        }
+        fullLines.push("");
+      }
+      const outPath = join(MEMORY_DIR, "recall.md");
+      writeFileSync(outPath, fullLines.join("\n"), "utf-8");
+
+      // preview: 2 most recent per category
+      const preview = [];
+      for (const [cat, entries] of groups) {
+        preview.push(`# ${cat}`);
+        for (const e of entries.slice(0, 2)) {
+          const date = e.date ? ` (${e.date})` : "";
+          const proj = e.project ? ` [${e.project}]` : "";
+          preview.push(`- ${e.name || e.path}${date}${proj}: ${e.description}`);
+        }
+        if (entries.length > 2) preview.push(`  … and ${entries.length - 2} more`);
+      }
+
+      return `${outPath}\n\n${preview.join("\n")}`;
     }
 
     default:
@@ -290,12 +406,12 @@ function dispatch(action, target, text, name, project, page) {
 
 // --- server ---
 
-const ALL_ACTIONS = ["topics", "search", "read", "write", "delete", "build"];
-const server = new McpServer({ name: "grug-brain", version: "0.1.0" });
+const ALL_ACTIONS = ["topics", "search", "read", "write", "delete", "recall"];
+const server = new McpServer({ name: "grug-brain", version: "0.2.0" });
 
 server.tool(
   "grug-brain",
-  "Grug remember thing. Call with no args for usage.",
+  "Grug remember thing. Actions: topics, search, read, write, delete, recall. No args for usage.",
   {
     action: z.enum(ALL_ACTIONS).optional(),
     target: z.string().optional(),
