@@ -307,8 +307,9 @@ function dispatch(action, target, text, name, project, page) {
 
     case "read": {
       if (!target) return HELP.read;
-      let filePath = join(MEMORY_DIR, target);
-      if (!existsSync(filePath)) filePath = resolve(target);
+      let t = target.endsWith(".md") ? target : `${target}.md`;
+      let filePath = join(MEMORY_DIR, t);
+      if (!existsSync(filePath)) filePath = resolve(t);
       if (!existsSync(filePath)) return `not found: ${target}`;
       const content = readFile(filePath);
       if (content === null) return `could not read: ${target}`;
@@ -347,13 +348,14 @@ function dispatch(action, target, text, name, project, page) {
 
     case "delete": {
       if (!target) return HELP.delete;
-      const filePath = join(MEMORY_DIR, target);
+      let t = target.endsWith(".md") ? target : `${target}.md`;
+      const filePath = join(MEMORY_DIR, t);
       if (!existsSync(filePath)) return `not found: ${target}`;
 
       unlinkSync(filePath);
-      removeFromIndex(target);
+      removeFromIndex(t);
 
-      return `deleted ${target}`;
+      return `deleted ${t}`;
     }
 
     case "recall": {
