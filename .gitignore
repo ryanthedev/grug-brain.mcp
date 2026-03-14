@@ -1,2 +1,5 @@
-node_modules/
-memories/
+# generated at runtime
+memories/.grug-brain.db
+memories/.grug-brain.db-wal
+memories/.grug-brain.db-shm
+memories/recall.md
