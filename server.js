@@ -107,7 +107,7 @@ const db = new Database(DB_PATH);
 db.pragma("journal_mode = WAL");
 
 // schema version check — rebuild if schema changed
-const SCHEMA_VERSION = 2;
+const SCHEMA_VERSION = 3;
 db.exec("CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT)");
 const currentVersion = db.prepare("SELECT value FROM meta WHERE key = 'schema_version'").get();
 if (!currentVersion || parseInt(currentVersion.value) < SCHEMA_VERSION) {
@@ -182,7 +182,7 @@ function indexFile(relPath, fullPath) {
   const category = relPath.split("/")[0];
 
   stmtDeleteFts.run(relPath);
-  stmtInsertFts.run(relPath, category, fm.name || "", fm.date || "", fm.project || "", desc, body);
+  stmtInsertFts.run(relPath, category, fm.name || "", fm.date || "", fm.project || category, desc, body);
   stmtUpsertFile.run(relPath, statSync(fullPath).mtimeMs);
 }
 
@@ -253,7 +253,7 @@ actions:
   topics                          list memory categories
   search   text:"query"           search across all memories (FTS5 + BM25 ranked)
   read     target:"path"          read a memory file (paginated)
-  write    target:"cat" text:"…"  write a memory (name: optional)
+  write    project:"p" text:"…"   write a memory (target: override folder, name: optional)
   delete   target:"cat/file.md"   delete a memory
   recall   project:"name"         dump all indexes (optional project filter)
 
@@ -265,12 +265,12 @@ const HELP = {
   read: `read: read a memory file
   target: path relative to memory dir (required)`,
   write: `write: create or update a memory
-  target: category name (required, created if missing)
+  project: project/repo name (required — also used as folder name)
+  target: override folder when it differs from project (optional, e.g. "feedback")
   name: filename slug (optional, derived from first line if omitted)
-  project: project/repo name for context (optional, stored in frontmatter)
   text: memory content in markdown (required)
   if text starts with --- frontmatter is preserved as-is
-  otherwise wraps in frontmatter with name/description/type/project fields`,
+  otherwise wraps in frontmatter with name/date/type/project fields`,
   delete: `delete: remove a memory and rebuild index
   target: path relative to memory dir, e.g. "feedback/no-summaries.md" (required)`,
 };
@@ -317,16 +317,18 @@ function dispatch(action, target, text, name, project, page) {
     }
 
     case "write": {
-      if (!target) return HELP.write;
+      if (!project) return HELP.write;
       if (!text) return HELP.write;
 
-      const catDir = join(MEMORY_DIR, slugify(target));
+      // folder defaults to project, target overrides
+      const folder = target || project;
+      const catDir = join(MEMORY_DIR, slugify(folder));
       ensureDir(catDir);
 
       let slug = name ? slugify(name) : null;
       if (!slug) {
         const firstLine = text.replace(/^---[\s\S]*?---\n*/, "")
-          .split("\n").find(l => l.trim() && !l.startsWith("#")) || target;
+          .split("\n").find(l => l.trim() && !l.startsWith("#")) || folder;
         slug = slugify(firstLine.substring(0, 60));
       }
       const filePath = join(catDir, `${slug}.md`);
@@ -334,8 +336,7 @@ function dispatch(action, target, text, name, project, page) {
 
       let content = text;
       if (!text.startsWith("---\n")) {
-        const projectLine = project ? `\nproject: ${project}` : "";
-        content = `---\nname: ${slug}\ndate: ${today()}\ntype: memory${projectLine}\n---\n\n${text}\n`;
+        content = `---\nname: ${slug}\ndate: ${today()}\ntype: memory\nproject: ${project}\n---\n\n${text}\n`;
       }
 
       writeFileSync(filePath, content, "utf-8");
