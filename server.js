@@ -1,7 +1,7 @@
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { z } from "zod";
-import Database from "better-sqlite3";
+import { Database } from "bun:sqlite";
 import {
   readdirSync, readFileSync, writeFileSync, existsSync,
   statSync, mkdirSync, unlinkSync,
@@ -92,7 +92,7 @@ function extractDescription(content) {
 
 ensureDir(MEMORY_DIR);
 const db = new Database(join(MEMORY_DIR, ".grug-brain.db"));
-db.pragma("journal_mode = WAL");
+db.exec("PRAGMA journal_mode = WAL");
 
 const SCHEMA_VERSION = 4;
 db.exec("CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT)");
