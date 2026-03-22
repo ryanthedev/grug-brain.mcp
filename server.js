@@ -60,13 +60,34 @@ function git(...args) {
 }
 
 function ensureGitRepo() {
-  if (git("rev-parse", "--git-dir") !== null) return true;
+  // Must be its own repo root, not a subdirectory of a parent repo
+  if (git("rev-parse", "--git-dir") === ".git") return true;
   if (git("init") === null) return false;
-  const ignore = "*.db\n*.db-wal\n*.db-shm\nrecall.md\n";
+  const ignore = "*.db\n*.db-wal\n*.db-shm\nrecall.md\nlocal/\n";
   writeFileSync(join(MEMORY_DIR, ".gitignore"), ignore, "utf-8");
   git("add", ".gitignore");
   git("commit", "-m", "grug: init");
   return true;
+}
+
+function hasRemote() {
+  const remote = git("remote");
+  return remote !== null && remote.length > 0;
+}
+
+function gitCommitMemory(relPath, action) {
+  if (!ensureGitRepo()) return;
+  git("add", "--", relPath);
+  git("commit", "-m", `grug: ${action} ${relPath}`, "--quiet");
+}
+
+function gitSync() {
+  if (!ensureGitRepo() || !hasRemote()) return;
+  const before = git("rev-parse", "HEAD");
+  git("pull", "--rebase", "--quiet");
+  const after = git("rev-parse", "HEAD");
+  git("push", "--quiet");
+  if (before !== after) syncMemories();
 }
 
 // --- parsing ---
@@ -387,6 +408,7 @@ server.tool(
     writeFileSync(filePath, fileContent, "utf-8");
     const relPath = relative(MEMORY_DIR, filePath);
     indexMemory(relPath, filePath);
+    gitCommitMemory(relPath, exists ? "update" : "write");
 
     return { content: [{ type: "text", text: `${exists ? "updated" : "created"} ${relPath}` }] };
   }
@@ -538,6 +560,7 @@ server.tool(
 
     unlinkSync(filePath);
     removeMemory(`${category}/${t}`);
+    gitCommitMemory(`${category}/${t}`, "delete");
 
     return { content: [{ type: "text", text: `deleted ${category}/${t}` }] };
   }
@@ -679,3 +702,11 @@ if (docStmts) {
 
 const transport = new StdioServerTransport();
 await server.connect(transport);
+
+// --- sync timer ---
+
+const SYNC_INTERVAL = 60_000;
+if (ensureGitRepo() && hasRemote()) {
+  setInterval(gitSync, SYNC_INTERVAL);
+  process.stderr.write("grug: sync enabled (1 min interval)\n");
+}

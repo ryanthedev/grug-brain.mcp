@@ -1,5 +1,5 @@
 ---
-description: Install and verify grug-brain. Registers MCP server, checks dependencies, sets up dreaming cron. Run after cloning or updating.
+description: Install and verify grug-brain. Registers MCP server, checks dependencies, configures shared brain. Run after installing or updating.
 allowed-tools: Bash, Read
 ---
 
@@ -27,7 +27,7 @@ If NOT registered, register it:
 claude mcp add grug-brain -- bun run ${CLAUDE_PLUGIN_ROOT}/server.js
 ```
 
-If already registered, check that the command path is correct (points to `${CLAUDE_PLUGIN_ROOT}/server.js`). If the path is stale (old location), remove and re-add:
+If already registered, check that the command path is correct (points to `${CLAUDE_PLUGIN_ROOT}/server.js`). If the path is stale, remove and re-add:
 
 ```bash
 claude mcp remove grug-brain
@@ -53,17 +53,41 @@ MEMORY_DIR="${MEMORY_DIR:-${CLAUDE_PLUGIN_ROOT}/memories}"
 cd "$MEMORY_DIR" && git rev-parse --git-dir 2>/dev/null
 ```
 
-If not a git repo, inform the user that `/dream` will auto-initialize it on first run.
+If not a git repo, it will auto-initialize on the first `grug-write`.
 
-## 6. Dream cron
+## 6. Shared brain
 
-Ask the user if they want to set up periodic dreaming. If yes, set up a cron that runs every 4 hours:
+Ask the user: **"Do you want to connect a shared brain? This syncs memories across machines via a git remote."**
 
-```bash
-claude cron add --name "grug-dream" --schedule "0 */4 * * *" --command "/dream" 2>/dev/null
-```
+If yes:
 
-If `claude cron` is not available, tell the user they can use `/loop 30m /dream` during active sessions instead.
+1. Ask for the remote repo URL (e.g., `git@github.com:user/grug-memories.git`)
+2. Initialize the memory git repo if needed:
+   ```bash
+   MEMORY_DIR="${MEMORY_DIR:-${CLAUDE_PLUGIN_ROOT}/memories}"
+   cd "$MEMORY_DIR"
+   git init 2>/dev/null
+   ```
+3. Check if a remote already exists:
+   ```bash
+   cd "$MEMORY_DIR" && git remote -v
+   ```
+4. If no remote, add one:
+   ```bash
+   cd "$MEMORY_DIR" && git remote add origin <repo-url>
+   ```
+5. Do an initial pull (if the remote repo already has content):
+   ```bash
+   cd "$MEMORY_DIR" && git pull origin main --rebase 2>/dev/null || git pull origin master --rebase 2>/dev/null
+   ```
+6. Push current memories:
+   ```bash
+   cd "$MEMORY_DIR" && git add -A && git commit -m "grug: initial sync" --quiet 2>/dev/null; git push -u origin main 2>/dev/null || git push -u origin master 2>/dev/null
+   ```
+
+Tell the user: sync runs automatically every 60 seconds while the MCP server is running. Memories in the `local/` category are never synced.
+
+If no, skip. Sync can be configured later by re-running `/setup`.
 
 ## 7. Summary
 
@@ -72,9 +96,9 @@ Report:
 - Dependencies: installed / error
 - MCP server: registered + healthy / needs restart
 - Memories: count of `.md` files, git status
+- Shared brain: connected (remote URL) / local only
 - Docs: count if docs/ exists, or "none"
-- Dream cron: active / not set up
-- Available commands: `/dream`, `/setup`
+- Available commands: `/dream`, `/setup`, `/ingest`
 - Available tools: grug-write, grug-search, grug-read, grug-recall, grug-delete, grug-dream, grug-docs
 
 If the MCP server was just registered or updated, tell the user to restart Claude Code for changes to take effect.
