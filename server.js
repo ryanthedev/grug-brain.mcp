@@ -6,13 +6,27 @@ import {
   readdirSync, readFileSync, writeFileSync, existsSync,
   statSync, mkdirSync, unlinkSync,
 } from "fs";
-import { join, relative, basename, dirname, extname } from "path";
+import { join, resolve, relative, basename, dirname, extname } from "path";
 import { fileURLToPath } from "url";
+import { execFileSync } from "child_process";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const MEMORY_DIR = process.env.MEMORY_DIR || join(__dirname, "memories");
+const DOCS_DIR = process.env.DOCS_DIR || join(__dirname, "docs");
+const PAGE_SIZE = 50;
+const SEARCH_PAGE_SIZE = 20;
 
 // --- helpers ---
+
+function paginate(text, page = 1) {
+  const lines = text.split("\n");
+  if (lines.length <= PAGE_SIZE) return text;
+  const totalPages = Math.ceil(lines.length / PAGE_SIZE);
+  const p = Math.max(1, Math.min(page, totalPages));
+  const start = (p - 1) * PAGE_SIZE;
+  const slice = lines.slice(start, start + PAGE_SIZE);
+  return `${slice.join("\n")}\n--- page ${p}/${totalPages} (${lines.length} lines) | page:${p + 1} for more ---`;
+}
 
 function isDir(p) {
   try { return statSync(p).isDirectory(); } catch { return false; }
@@ -34,32 +48,28 @@ function today() {
   return new Date().toISOString().slice(0, 10);
 }
 
-// --- categories ---
+// --- git ---
 
-function getCategories() {
-  ensureDir(MEMORY_DIR);
-  return readdirSync(MEMORY_DIR, { withFileTypes: true })
-    .filter(d => d.isDirectory() && !d.name.startsWith("."))
-    .map(d => d.name)
-    .sort();
+function git(...args) {
+  try {
+    return execFileSync("git", args, {
+      cwd: MEMORY_DIR, encoding: "utf-8", timeout: 10000,
+      stdio: ["pipe", "pipe", "pipe"],
+    }).trim();
+  } catch { return null; }
 }
 
-function walkFiles(dir) {
-  const files = [];
-  if (!existsSync(dir)) return files;
-  for (const entry of readdirSync(dir, { withFileTypes: true })) {
-    if (entry.name.startsWith(".")) continue;
-    const full = join(dir, entry.name);
-    if (entry.isDirectory()) {
-      files.push(...walkFiles(full));
-    } else if (entry.name.endsWith(".md")) {
-      files.push(full);
-    }
-  }
-  return files.sort();
+function ensureGitRepo() {
+  if (git("rev-parse", "--git-dir") !== null) return true;
+  if (git("init") === null) return false;
+  const ignore = "*.db\n*.db-wal\n*.db-shm\nrecall.md\n";
+  writeFileSync(join(MEMORY_DIR, ".gitignore"), ignore, "utf-8");
+  git("add", ".gitignore");
+  git("commit", "-m", "grug: init");
+  return true;
 }
 
-// --- frontmatter ---
+// --- parsing ---
 
 function extractFrontmatter(content) {
   const m = content.match(/^---\n([\s\S]*?)\n---/);
@@ -82,157 +92,273 @@ function extractDescription(content) {
   const body = extractBody(content);
   for (const line of body.split("\n")) {
     const trimmed = line.trim();
-    if (!trimmed || trimmed.startsWith("#") || trimmed.startsWith("```")) continue;
+    if (!trimmed || trimmed.startsWith("#") || trimmed.startsWith("```")
+      || trimmed.startsWith(":::") || trimmed.startsWith("import ")) continue;
     return trimmed.replace(/[`_*]/g, "").substring(0, 120);
   }
   return "";
 }
 
-// --- FTS database ---
+// --- file walkers ---
 
-ensureDir(MEMORY_DIR);
-const db = new Database(join(MEMORY_DIR, ".grug-brain.db"));
-db.exec("PRAGMA journal_mode = WAL");
-
-const SCHEMA_VERSION = 4;
-db.exec("CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT)");
-const currentVersion = db.prepare("SELECT value FROM meta WHERE key = 'schema_version'").get();
-if (!currentVersion || parseInt(currentVersion.value) < SCHEMA_VERSION) {
-  db.exec("DROP TABLE IF EXISTS files");
-  db.exec("DROP TABLE IF EXISTS memories_fts");
-  db.prepare("INSERT OR REPLACE INTO meta (key, value) VALUES ('schema_version', ?)").run(String(SCHEMA_VERSION));
+function getCategories(dir) {
+  ensureDir(dir);
+  return readdirSync(dir)
+    .filter(name => !name.startsWith(".") && isDir(join(dir, name)))
+    .sort();
 }
 
-db.exec(`
-  CREATE TABLE IF NOT EXISTS files (
-    path TEXT PRIMARY KEY,
-    mtime REAL NOT NULL
-  );
-  CREATE VIRTUAL TABLE IF NOT EXISTS memories_fts USING fts5(
-    path UNINDEXED,
-    category,
-    name,
-    date UNINDEXED,
-    description,
-    body,
-    tokenize = 'porter unicode61'
-  );
-`);
+function walkMemoryFiles(dir) {
+  const files = [];
+  if (!existsSync(dir)) return files;
+  for (const name of readdirSync(dir)) {
+    if (name.startsWith(".")) continue;
+    const full = join(dir, name);
+    if (isDir(full)) {
+      files.push(...walkMemoryFiles(full));
+    } else if (name.endsWith(".md")) {
+      files.push(full);
+    }
+  }
+  return files.sort();
+}
 
-const stmtGetFile = db.prepare("SELECT mtime FROM files WHERE path = ?");
-const stmtUpsertFile = db.prepare("INSERT OR REPLACE INTO files (path, mtime) VALUES (?, ?)");
-const stmtDeleteFile = db.prepare("DELETE FROM files WHERE path = ?");
-const stmtAllFiles = db.prepare("SELECT path FROM files");
+function walkDocFiles(dir) {
+  const files = [];
+  if (!existsSync(dir)) return files;
+  for (const name of readdirSync(dir)) {
+    if (name.startsWith(".") || name.startsWith("_")) continue;
+    const full = join(dir, name);
+    if (isDir(full)) {
+      files.push(...walkDocFiles(full));
+    } else if (name.endsWith(".md") || name.endsWith(".mdx")) {
+      files.push(full);
+    }
+  }
+  return files.sort();
+}
 
-const stmtInsertFts = db.prepare(
-  "INSERT INTO memories_fts (path, category, name, date, description, body) VALUES (?, ?, ?, ?, ?, ?)"
+// --- init DB helper ---
+
+function initDb(dbPath, schemaVersion, tableName, ftsColumns) {
+  const db = new Database(dbPath);
+  db.run("PRAGMA journal_mode = WAL");
+  db.run("CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT)");
+  const cur = db.prepare("SELECT value FROM meta WHERE key = 'schema_version'").get();
+  if (!cur || parseInt(cur.value) < schemaVersion) {
+    db.run("DROP TABLE IF EXISTS files");
+    db.run(`DROP TABLE IF EXISTS ${tableName}`);
+    db.prepare("INSERT OR REPLACE INTO meta (key, value) VALUES ('schema_version', ?)").run(String(schemaVersion));
+  }
+  db.run(`CREATE TABLE IF NOT EXISTS files (path TEXT PRIMARY KEY, mtime REAL NOT NULL)`);
+  db.run(`CREATE VIRTUAL TABLE IF NOT EXISTS ${tableName} USING fts5(${ftsColumns}, tokenize = 'porter unicode61')`);
+  return db;
+}
+
+// ============================================================
+// MEMORY DATABASE
+// ============================================================
+
+ensureDir(MEMORY_DIR);
+const memDb = initDb(
+  join(MEMORY_DIR, ".grug-brain.db"), 4, "memories_fts",
+  "path UNINDEXED, category, name, date UNINDEXED, description, body"
 );
-const stmtDeleteFts = db.prepare("DELETE FROM memories_fts WHERE path = ?");
 
-const SEARCH_PAGE_SIZE = 20;
-const stmtSearchCount = db.prepare(
-  "SELECT COUNT(*) as total FROM memories_fts WHERE memories_fts MATCH ?"
-);
-const stmtSearch = db.prepare(`
-  SELECT path, category, name, date, description,
-         highlight(memories_fts, 4, '>>>', '<<<') as snippet,
-         rank
-  FROM memories_fts
-  WHERE memories_fts MATCH ?
-  ORDER BY rank
-  LIMIT ? OFFSET ?
-`);
+const memStmts = {
+  getFile: memDb.prepare("SELECT mtime FROM files WHERE path = ?"),
+  upsertFile: memDb.prepare("INSERT OR REPLACE INTO files (path, mtime) VALUES (?, ?)"),
+  deleteFile: memDb.prepare("DELETE FROM files WHERE path = ?"),
+  allFiles: memDb.prepare("SELECT path FROM files"),
+  insertFts: memDb.prepare("INSERT INTO memories_fts (path, category, name, date, description, body) VALUES (?, ?, ?, ?, ?, ?)"),
+  deleteFts: memDb.prepare("DELETE FROM memories_fts WHERE path = ?"),
+  searchCount: memDb.prepare("SELECT COUNT(*) as total FROM memories_fts WHERE memories_fts MATCH ?"),
+  search: memDb.prepare(`
+    SELECT path, category, name, date, description,
+           highlight(memories_fts, 4, '>>>', '<<<') as snippet,
+           rank
+    FROM memories_fts
+    WHERE memories_fts MATCH ?
+    ORDER BY rank
+    LIMIT ? OFFSET ?
+  `),
+  recall: memDb.prepare("SELECT path, category, name, date, description FROM memories_fts ORDER BY category, date DESC"),
+  recallByCategory: memDb.prepare("SELECT path, category, name, date, description FROM memories_fts WHERE category = ? ORDER BY date DESC"),
+  categoryCounts: memDb.prepare("SELECT category, COUNT(*) as count FROM memories_fts GROUP BY category ORDER BY category"),
+};
 
-const stmtRecall = db.prepare(`
-  SELECT path, category, name, date, description
-  FROM memories_fts
-  ORDER BY category, date DESC
-`);
-const stmtRecallByCategory = db.prepare(`
-  SELECT path, category, name, date, description
-  FROM memories_fts
-  WHERE category = ?
-  ORDER BY date DESC
-`);
-const stmtCategoryCounts = db.prepare(`
-  SELECT category, COUNT(*) as count
-  FROM memories_fts
-  GROUP BY category
-  ORDER BY category
-`);
-
-function indexFile(relPath, fullPath) {
+function indexMemory(relPath, fullPath) {
   const content = readFile(fullPath);
   if (!content) return;
   const fm = extractFrontmatter(content);
   const body = extractBody(content);
   const desc = extractDescription(content);
   const category = relPath.split("/")[0];
-
-  stmtDeleteFts.run(relPath);
-  stmtInsertFts.run(relPath, category, fm.name || basename(relPath, ".md"), fm.date || "", desc, body);
-  stmtUpsertFile.run(relPath, statSync(fullPath).mtimeMs);
+  memStmts.deleteFts.run(relPath);
+  memStmts.insertFts.run(relPath, category, fm.name || basename(relPath, ".md"), fm.date || "", desc, body);
+  memStmts.upsertFile.run(relPath, statSync(fullPath).mtimeMs);
 }
 
-function removeFromIndex(relPath) {
-  stmtDeleteFts.run(relPath);
-  stmtDeleteFile.run(relPath);
+function removeMemory(relPath) {
+  memStmts.deleteFts.run(relPath);
+  memStmts.deleteFile.run(relPath);
 }
 
-function syncIndex() {
-  const indexed = new Set(stmtAllFiles.all().map(r => r.path));
+function syncMemories() {
+  const indexed = new Set(memStmts.allFiles.all().map(r => r.path));
   const onDisk = new Set();
-
-  for (const cat of getCategories()) {
-    for (const fullPath of walkFiles(join(MEMORY_DIR, cat))) {
+  for (const cat of getCategories(MEMORY_DIR)) {
+    for (const fullPath of walkMemoryFiles(join(MEMORY_DIR, cat))) {
       const relPath = relative(MEMORY_DIR, fullPath);
       onDisk.add(relPath);
-
-      const row = stmtGetFile.get(relPath);
+      const row = memStmts.getFile.get(relPath);
       const mtime = statSync(fullPath).mtimeMs;
-      if (!row || row.mtime !== mtime) {
-        indexFile(relPath, fullPath);
-      }
+      if (!row || row.mtime !== mtime) indexMemory(relPath, fullPath);
     }
   }
-
   for (const path of indexed) {
-    if (!onDisk.has(path)) removeFromIndex(path);
+    if (!onDisk.has(path)) removeMemory(path);
   }
 }
 
-syncIndex();
+syncMemories();
 
-// --- search ---
+// ============================================================
+// DOCS DATABASE
+// ============================================================
 
-function search(query, page = 1) {
+let docsDb = null;
+let docStmts = null;
+let docsTotal = 0;
+
+if (existsSync(DOCS_DIR) && getCategories(DOCS_DIR).length > 0) {
+  docsDb = initDb(
+    join(DOCS_DIR, ".docs.db"), 1, "docs_fts",
+    "path UNINDEXED, category, title, description, body"
+  );
+
+  docStmts = {
+    getFile: docsDb.prepare("SELECT mtime FROM files WHERE path = ?"),
+    upsertFile: docsDb.prepare("INSERT OR REPLACE INTO files (path, mtime) VALUES (?, ?)"),
+    deleteFile: docsDb.prepare("DELETE FROM files WHERE path = ?"),
+    allFiles: docsDb.prepare("SELECT path FROM files"),
+    insertFts: docsDb.prepare("INSERT INTO docs_fts (path, category, title, description, body) VALUES (?, ?, ?, ?, ?)"),
+    deleteFts: docsDb.prepare("DELETE FROM docs_fts WHERE path = ?"),
+    searchCount: docsDb.prepare("SELECT COUNT(*) as total FROM docs_fts WHERE docs_fts MATCH ?"),
+    search: docsDb.prepare(`
+      SELECT path, category, title, description,
+             snippet(docs_fts, 4, '>>>', '<<<', '…', 40) as snippet,
+             rank
+      FROM docs_fts
+      WHERE docs_fts MATCH ?
+      ORDER BY rank
+      LIMIT ? OFFSET ?
+    `),
+    categoryCounts: docsDb.prepare("SELECT category, COUNT(*) as count FROM docs_fts GROUP BY category ORDER BY category"),
+  };
+
+  function indexDoc(relPath, fullPath) {
+    const content = readFile(fullPath);
+    if (!content) return;
+    const fm = extractFrontmatter(content);
+    const body = extractBody(content);
+    const desc = extractDescription(content);
+    const category = relPath.split("/")[0];
+    const title = fm.title || basename(relPath, extname(relPath));
+    docStmts.deleteFts.run(relPath);
+    docStmts.insertFts.run(relPath, category, title, desc, body);
+    docStmts.upsertFile.run(relPath, statSync(fullPath).mtimeMs);
+  }
+
+  function removeDoc(relPath) {
+    docStmts.deleteFts.run(relPath);
+    docStmts.deleteFile.run(relPath);
+  }
+
+  function syncDocs() {
+    const indexed = new Set(docStmts.allFiles.all().map(r => r.path));
+    const onDisk = new Set();
+    let added = 0, updated = 0, removed = 0;
+    for (const cat of getCategories(DOCS_DIR)) {
+      for (const fullPath of walkDocFiles(join(DOCS_DIR, cat))) {
+        const relPath = relative(DOCS_DIR, fullPath);
+        onDisk.add(relPath);
+        const row = docStmts.getFile.get(relPath);
+        const mtime = statSync(fullPath).mtimeMs;
+        if (!row) { indexDoc(relPath, fullPath); added++; }
+        else if (row.mtime !== mtime) { indexDoc(relPath, fullPath); updated++; }
+      }
+    }
+    for (const path of indexed) {
+      if (!onDisk.has(path)) { removeDoc(path); removed++; }
+    }
+    return { added, updated, removed };
+  }
+
+  const docSync = syncDocs();
+  docsTotal = docStmts.allFiles.all().length;
+  const catSummary = docStmts.categoryCounts.all().map(r => `${r.category}(${r.count})`).join(", ");
+  process.stderr.write(`grug: docs ${docsTotal} files in [${catSummary}]`);
+  if (docSync.added || docSync.updated || docSync.removed) {
+    process.stderr.write(` — +${docSync.added} ~${docSync.updated} -${docSync.removed}`);
+  }
+  process.stderr.write("\n");
+}
+
+// ============================================================
+// SEARCH (both databases, merged by rank)
+// ============================================================
+
+function buildFtsQuery(query) {
   const terms = query.trim().split(/\s+/).filter(Boolean);
-  if (terms.length === 0) return { results: [], total: 0 };
-
-  const offset = (Math.max(1, page) - 1) * SEARCH_PAGE_SIZE;
-  const ftsQuery = terms.length === 1
+  if (terms.length === 0) return null;
+  return terms.length === 1
     ? `"${terms[0]}"*`
     : terms.map(t => `"${t}"*`).join(" OR ");
+}
 
+function ftsSearch(stmts, ftsQuery, limit, offset) {
   try {
-    const { total } = stmtSearchCount.get(ftsQuery);
-    const results = stmtSearch.all(ftsQuery, SEARCH_PAGE_SIZE, offset);
+    const { total } = stmts.searchCount.get(ftsQuery);
+    const results = stmts.search.all(ftsQuery, limit, offset);
     return { results, total };
   } catch {
     try {
-      const simple = terms.map(t => `"${t}"`).join(" OR ");
-      const { total } = stmtSearchCount.get(simple);
-      const results = stmtSearch.all(simple, SEARCH_PAGE_SIZE, offset);
+      const simple = ftsQuery.replace(/\*/g, "");
+      const { total } = stmts.searchCount.get(simple);
+      const results = stmts.search.all(simple, limit, offset);
       return { results, total };
     } catch {
-      return `search error — try simpler terms`;
+      return { results: [], total: 0 };
     }
   }
 }
 
-// --- server ---
+function searchAll(query, page = 1) {
+  const ftsQuery = buildFtsQuery(query);
+  if (!ftsQuery) return { memories: [], docs: [], memTotal: 0, docTotal: 0 };
 
-const server = new McpServer({ name: "grug-brain", version: "1.0.0" });
+  const offset = (Math.max(1, page) - 1) * SEARCH_PAGE_SIZE;
+  const half = Math.floor(SEARCH_PAGE_SIZE / 2);
+
+  const mem = ftsSearch(memStmts, ftsQuery, half, offset);
+
+  let doc = { results: [], total: 0 };
+  if (docStmts) {
+    doc = ftsSearch(docStmts, ftsQuery, half, offset);
+  }
+
+  return {
+    memories: mem.results, docs: doc.results,
+    memTotal: mem.total, docTotal: doc.total,
+  };
+}
+
+// ============================================================
+// SERVER + TOOLS
+// ============================================================
+
+const server = new McpServer({ name: "grug-brain", version: "2.0.0" });
 
 // --- grug-write ---
 
@@ -260,7 +386,7 @@ server.tool(
 
     writeFileSync(filePath, fileContent, "utf-8");
     const relPath = relative(MEMORY_DIR, filePath);
-    indexFile(relPath, filePath);
+    indexMemory(relPath, filePath);
 
     return { content: [{ type: "text", text: `${exists ? "updated" : "created"} ${relPath}` }] };
   }
@@ -270,27 +396,41 @@ server.tool(
 
 server.tool(
   "grug-search",
-  "Full-text search across all memories. BM25 ranked, porter stemming, prefix matching.",
+  `Search across memories${docStmts ? " and docs" : ""}. BM25 ranked, porter stemming.`,
   {
     query: z.string().describe("Search terms"),
-    page: z.number().optional().describe("Page number for results (20 per page)"),
+    page: z.number().optional().describe("Page number (20 results per page)"),
   },
   async ({ query, page }) => {
-    const result = search(query, page);
-    if (typeof result === "string") return { content: [{ type: "text", text: result }] };
+    const { memories, docs, memTotal, docTotal } = searchAll(query, page);
+    const total = memTotal + docTotal;
+    if (total === 0) return { content: [{ type: "text", text: `no matches for "${query}"` }] };
 
-    const { results, total } = result;
-    if (results.length === 0) return { content: [{ type: "text", text: `no matches for "${query}"` }] };
-
+    const lines = [];
     const p = Math.max(1, page || 1);
-    const totalPages = Math.ceil(total / SEARCH_PAGE_SIZE);
-    const out = results.map(r => {
-      const date = r.date ? ` date:${r.date}` : "";
-      return `${r.path}${date} category:${r.category}\n  ${r.snippet || r.description}`;
-    });
-    const paging = totalPages > 1 ? `\n--- page ${p}/${totalPages} (${total} total) | page:${p + 1} for more ---` : "";
 
-    return { content: [{ type: "text", text: `${total} match${total === 1 ? "" : "es"} for "${query}"\n\n${out.join("\n")}${paging}` }] };
+    if (memories.length > 0) {
+      lines.push(`## memories (${memTotal} matches)\n`);
+      for (const r of memories) {
+        const date = r.date ? ` date:${r.date}` : "";
+        lines.push(`${r.path}${date} [${r.category}]\n  ${r.snippet || r.description}`);
+      }
+    }
+
+    if (docs.length > 0) {
+      if (lines.length > 0) lines.push("");
+      lines.push(`## docs (${docTotal} matches)\n`);
+      for (const r of docs) {
+        lines.push(`${r.path} [${r.category}] — ${r.title || ""}\n  ${r.snippet || r.description}`);
+      }
+    }
+
+    const totalPages = Math.ceil(Math.max(memTotal, docTotal) / (SEARCH_PAGE_SIZE / 2));
+    const paging = totalPages > 1
+      ? `\n--- page ${p}/${totalPages} | page:${p + 1} for more ---`
+      : "";
+
+    return { content: [{ type: "text", text: `${total} matches for "${query}"\n\n${lines.join("\n")}${paging}` }] };
   }
 );
 
@@ -304,17 +444,15 @@ server.tool(
     path: z.string().optional().describe("Filename within the category to read"),
   },
   async ({ category, path: name }) => {
-    // no args: list categories
     if (!category && !name) {
-      const rows = stmtCategoryCounts.all();
+      const rows = memStmts.categoryCounts.all();
       if (rows.length === 0) return { content: [{ type: "text", text: "no categories yet" }] };
       const lines = rows.map(r => `  ${r.category}  (${r.count} memories)`);
       return { content: [{ type: "text", text: `${rows.length} categories\n\n${lines.join("\n")}` }] };
     }
 
-    // category only: list files in category
     if (category && !name) {
-      const rows = stmtRecallByCategory.all(category);
+      const rows = memStmts.recallByCategory.all(category);
       if (rows.length === 0) return { content: [{ type: "text", text: `no memories in "${category}"` }] };
       const lines = rows.map(r => {
         const date = r.date ? ` (${r.date})` : "";
@@ -323,7 +461,6 @@ server.tool(
       return { content: [{ type: "text", text: `# ${category} (${rows.length} memories)\n\n${lines.join("\n")}` }] };
     }
 
-    // category + path: read specific file
     const cat = category || name.split("/")[0];
     const file = name.includes("/") ? name.split("/").pop() : name;
     let t = file.endsWith(".md") ? file : `${file}.md`;
@@ -347,19 +484,17 @@ server.tool(
   },
   async ({ category }) => {
     const rows = category
-      ? stmtRecallByCategory.all(category)
-      : stmtRecall.all();
+      ? memStmts.recallByCategory.all(category)
+      : memStmts.recall.all();
 
     if (rows.length === 0) return { content: [{ type: "text", text: `no memories found${category ? ` in "${category}"` : ""}` }] };
 
-    // group by category
     const groups = new Map();
     for (const r of rows) {
       if (!groups.has(r.category)) groups.set(r.category, []);
       groups.get(r.category).push(r);
     }
 
-    // full dump to file
     const fullLines = [];
     for (const [cat, entries] of groups) {
       fullLines.push(`# ${cat}\n`);
@@ -372,7 +507,6 @@ server.tool(
     const outPath = join(MEMORY_DIR, "recall.md");
     writeFileSync(outPath, fullLines.join("\n"), "utf-8");
 
-    // preview: 2 most recent per category
     const preview = [];
     for (const [cat, entries] of groups) {
       preview.push(`# ${cat}`);
@@ -403,11 +537,145 @@ server.tool(
     if (!existsSync(filePath)) return { content: [{ type: "text", text: `not found: ${category}/${file}` }] };
 
     unlinkSync(filePath);
-    removeFromIndex(`${category}/${t}`);
+    removeMemory(`${category}/${t}`);
 
     return { content: [{ type: "text", text: `deleted ${category}/${t}` }] };
   }
 );
+
+// --- grug-dream ---
+
+server.tool(
+  "grug-dream",
+  "Dream: review memory health. Commits pending changes to git, shows history, finds cross-links across categories, flags stale memories. Use with /loop for periodic maintenance.",
+  {},
+  async () => {
+    syncMemories();
+    const all = memStmts.recall.all();
+    if (all.length === 0) {
+      return { content: [{ type: "text", text: "nothing to dream about — no memories yet" }] };
+    }
+
+    const sections = [];
+    const hasGit = ensureGitRepo();
+
+    // --- commit pending & show history ---
+    if (hasGit) {
+      git("add", "-A");
+      git("commit", "-m", "grug: dream sync", "--quiet");
+      const log = git("log", "--oneline", "--name-status", "-15", "--", ".");
+      sections.push(log
+        ? `## recent history\n\n\`\`\`\n${log}\n\`\`\``
+        : "## recent history\n\nno commits yet"
+      );
+    }
+
+    // --- cross-links ---
+    const links = [];
+    const seen = new Set();
+
+    for (const mem of all) {
+      const terms = mem.name.replace(/[-_]/g, " ").split(/\s+/).filter(t => t.length > 3);
+      if (terms.length === 0) continue;
+      const q = terms.slice(0, 3).map(t => `"${t}"`).join(" OR ");
+      try {
+        const matches = memStmts.search.all(q, 5, 0);
+        for (const m of matches) {
+          if (m.path === mem.path || m.category === mem.category) continue;
+          const key = [mem.path, m.path].sort().join("|");
+          if (seen.has(key)) continue;
+          seen.add(key);
+          links.push({ a: `${mem.name} [${mem.category}]`, b: `${m.name} [${m.category}]`, rank: m.rank });
+        }
+      } catch { /* skip bad queries */ }
+    }
+
+    if (links.length > 0) {
+      links.sort((a, b) => a.rank - b.rank);
+      const top = links.slice(0, 10);
+      sections.push(`## cross-links (${links.length} found, top ${top.length})\n\n${top.map(l => `- ${l.a} ↔ ${l.b}`).join("\n")}`);
+    }
+
+    // --- stale memories ---
+    const now = Date.now();
+    const STALE_DAYS = 90;
+    const stale = all
+      .filter(m => m.date && !isNaN(new Date(m.date)))
+      .map(m => ({ ...m, age: Math.floor((now - new Date(m.date).getTime()) / 86400000) }))
+      .filter(m => m.age >= STALE_DAYS)
+      .sort((a, b) => b.age - a.age);
+
+    if (stale.length > 0) {
+      sections.push(`## stale (${stale.length} memories > ${STALE_DAYS} days)\n\n${stale.map(s =>
+        `- ${s.name} [${s.category}] — ${s.age}d (${s.date}): ${s.description}`
+      ).join("\n")}`);
+    }
+
+    // --- quality issues ---
+    const issues = all.filter(m => !m.date || !m.description);
+    if (issues.length > 0) {
+      sections.push(`## quality issues\n\n${issues.map(m =>
+        `- ${m.name} [${m.category}]: ${!m.date ? "no date" : "no description"}`
+      ).join("\n")}`);
+    }
+
+    // --- full inventory ---
+    const groups = new Map();
+    for (const r of all) {
+      if (!groups.has(r.category)) groups.set(r.category, []);
+      groups.get(r.category).push(r);
+    }
+    const inv = [];
+    for (const [cat, entries] of groups) {
+      inv.push(`**${cat}** (${entries.length})`);
+      for (const e of entries) inv.push(`  - ${e.name}${e.date ? ` ${e.date}` : ""}: ${e.description}`);
+    }
+    sections.push(`## inventory\n\n${inv.join("\n")}`);
+
+    // --- header ---
+    const catCount = memStmts.categoryCounts.all().length;
+    const summary = `${all.length} memories | ${catCount} categories | ${links.length} cross-links | ${stale.length} stale`;
+    sections.unshift(`# dream report\n\n${summary}\n\nReview below. Use grug-write to update, grug-delete to remove. Check stale memories for accuracy. Add cross-reference notes where useful.`);
+
+    return { content: [{ type: "text", text: sections.join("\n\n") }] };
+  }
+);
+
+// --- grug-docs ---
+
+if (docStmts) {
+  server.tool(
+    "grug-docs",
+    `Browse and read documentation. ${docsTotal} docs across: ${docStmts.categoryCounts.all().map(r => `${r.category} (${r.count})`).join(", ")}.`,
+    {
+      category: z.string().optional().describe("Doc category to browse"),
+      path: z.string().optional().describe("File path to read (relative to docs dir)"),
+      page: z.number().optional().describe("Page number for long files"),
+    },
+    async ({ category, path: target, page }) => {
+      if (!category && !target) {
+        const rows = docStmts.categoryCounts.all();
+        if (rows.length === 0) return { content: [{ type: "text", text: `no docs found in ${DOCS_DIR}` }] };
+        const lines = rows.map(r => `  ${r.category}  (${r.count} docs)`);
+        return { content: [{ type: "text", text: `${rows.length} doc categories\n\n${lines.join("\n")}` }] };
+      }
+
+      if (target) {
+        let filePath = join(DOCS_DIR, target);
+        if (!existsSync(filePath)) filePath = resolve(target);
+        if (!existsSync(filePath)) return { content: [{ type: "text", text: `file not found: ${target}` }] };
+        const content = readFile(filePath);
+        if (content === null) return { content: [{ type: "text", text: `could not read: ${target}` }] };
+        return { content: [{ type: "text", text: paginate(content, page) }] };
+      }
+
+      const rows = docStmts.search.all(`"${category}"*`, 30, 0);
+      if (rows.length === 0) return { content: [{ type: "text", text: `no docs in "${category}"` }] };
+      const lines = rows.map(r => `- [${r.title}](${r.path}): ${r.description || ""}`);
+      return { content: [{ type: "text", text: `# ${category} (${rows.length} docs)\n\n${lines.join("\n")}` }] };
+    }
+  );
+}
 
 const transport = new StdioServerTransport();
 await server.connect(transport);
