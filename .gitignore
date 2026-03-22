@@ -3,3 +3,7 @@ memories/.grug-brain.db
 memories/.grug-brain.db-wal
 memories/.grug-brain.db-shm
 memories/recall.md
+docs/.docs.db
+docs/.docs.db-wal
+docs/.docs.db-shm
+node_modules/
