@@ -63,7 +63,7 @@ function ensureGitRepo() {
   // Must be its own repo root, not a subdirectory of a parent repo
   if (git("rev-parse", "--git-dir") === ".git") return true;
   if (git("init") === null) return false;
-  const ignore = "*.db\n*.db-wal\n*.db-shm\nrecall.md\nlocal/\n";
+  const ignore = "*.db\n*.db-wal\n*.db-shm\nrecall.md\nlocal/\n.grugignore\n";
   writeFileSync(join(MEMORY_DIR, ".gitignore"), ignore, "utf-8");
   git("add", ".gitignore");
   git("commit", "-m", "grug: init");
@@ -75,8 +75,52 @@ function hasRemote() {
   return remote !== null && remote.length > 0;
 }
 
+function loadGrugIgnore() {
+  const content = readFile(join(MEMORY_DIR, ".grugignore"));
+  if (!content) return [];
+  return content.split("\n").map(l => l.trim()).filter(l => l && !l.startsWith("#"));
+}
+
+function isLocalMemory(relPath, content) {
+  // frontmatter sync: false
+  if (content) {
+    const fm = extractFrontmatter(content);
+    if (fm.sync === "false") return true;
+  }
+  // .grugignore patterns
+  for (const pattern of loadGrugIgnore()) {
+    if (pattern.endsWith("/") && relPath.startsWith(pattern)) return true;
+    if (pattern.includes("*")) {
+      const regex = new RegExp("^" + pattern.replace(/\./g, "\\.").replace(/\*/g, ".*") + "$");
+      if (regex.test(relPath)) return true;
+    }
+    if (relPath === pattern || relPath.startsWith(pattern + "/")) return true;
+  }
+  return false;
+}
+
+function syncGitExclude() {
+  if (!ensureGitRepo()) return;
+  const lines = ["# managed by grug-brain", ".grugignore"];
+  lines.push(...loadGrugIgnore());
+  // find sync:false memories
+  for (const { path } of memStmts.allFiles.all()) {
+    const content = readFile(join(MEMORY_DIR, path));
+    if (content && extractFrontmatter(content).sync === "false") lines.push(path);
+  }
+  ensureDir(join(MEMORY_DIR, ".git", "info"));
+  writeFileSync(join(MEMORY_DIR, ".git", "info", "exclude"), lines.join("\n") + "\n", "utf-8");
+}
+
 function gitCommitMemory(relPath, action) {
   if (!ensureGitRepo()) return;
+  if (action !== "delete") {
+    const content = readFile(join(MEMORY_DIR, relPath));
+    if (isLocalMemory(relPath, content)) {
+      syncGitExclude();
+      return;
+    }
+  }
   git("add", "--", relPath);
   git("commit", "-m", `grug: ${action} ${relPath}`, "--quiet");
 }
@@ -243,6 +287,7 @@ function syncMemories() {
 }
 
 syncMemories();
+syncGitExclude();
 
 // ============================================================
 // DOCS DATABASE
@@ -385,7 +430,7 @@ const server = new McpServer({ name: "grug-brain", version: "2.0.0" });
 
 server.tool(
   "grug-write",
-  "Store a memory. Saved as markdown with frontmatter, indexed for search.",
+  "Store a memory. Saved as markdown with frontmatter, indexed for search. Add sync: false to frontmatter to keep local-only.",
   {
     category: z.string().describe("Folder to store in, e.g. loopback, feedback, react-native"),
     path: z.string().describe("Filename for the memory, e.g. no-db-mocks"),
@@ -584,6 +629,7 @@ server.tool(
 
     // --- commit pending & show history ---
     if (hasGit) {
+      syncGitExclude();
       git("add", "-A");
       git("commit", "-m", "grug: dream sync", "--quiet");
       const log = git("log", "--oneline", "--name-status", "-15", "--", ".");
