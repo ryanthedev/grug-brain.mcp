@@ -230,6 +230,15 @@ const memDb = initDb(
   "path UNINDEXED, category, name, date UNINDEXED, description, body"
 );
 
+memDb.run("CREATE TABLE IF NOT EXISTS dream_log (path TEXT PRIMARY KEY, reviewed_at TEXT NOT NULL, mtime_at_review REAL NOT NULL)");
+memDb.run(`CREATE TABLE IF NOT EXISTS cross_links (
+  path_a TEXT NOT NULL,
+  path_b TEXT NOT NULL,
+  score REAL NOT NULL,
+  created_at TEXT NOT NULL,
+  PRIMARY KEY (path_a, path_b)
+)`);
+
 const memStmts = {
   getFile: memDb.prepare("SELECT mtime FROM files WHERE path = ?"),
   upsertFile: memDb.prepare("INSERT OR REPLACE INTO files (path, mtime) VALUES (?, ?)"),
@@ -250,6 +259,39 @@ const memStmts = {
   recall: memDb.prepare("SELECT path, category, name, date, description FROM memories_fts ORDER BY category, date DESC"),
   recallByCategory: memDb.prepare("SELECT path, category, name, date, description FROM memories_fts WHERE category = ? ORDER BY date DESC"),
   categoryCounts: memDb.prepare("SELECT category, COUNT(*) as count FROM memories_fts GROUP BY category ORDER BY category"),
+  upsertLink: memDb.prepare("INSERT OR REPLACE INTO cross_links (path_a, path_b, score, created_at) VALUES (?, ?, ?, ?)"),
+  deleteLinks: memDb.prepare("DELETE FROM cross_links WHERE path_a = ? OR path_b = ?"),
+  getLinks: memDb.prepare(`
+    SELECT path_a, path_b, score,
+           m1.name as name_a, m1.category as cat_a,
+           m2.name as name_b, m2.category as cat_b
+    FROM cross_links
+    JOIN memories_fts m1 ON m1.path = path_a
+    JOIN memories_fts m2 ON m2.path = path_b
+    WHERE path_a = ? OR path_b = ?
+    ORDER BY score
+    LIMIT 10
+  `),
+  allLinks: memDb.prepare(`
+    SELECT path_a, path_b, score,
+           m1.name as name_a, m1.category as cat_a,
+           m2.name as name_b, m2.category as cat_b
+    FROM cross_links
+    JOIN memories_fts m1 ON m1.path = path_a
+    JOIN memories_fts m2 ON m2.path = path_b
+    ORDER BY score
+    LIMIT 20
+  `),
+  getDreamLog: memDb.prepare("SELECT reviewed_at, mtime_at_review FROM dream_log WHERE path = ?"),
+  upsertDreamLog: memDb.prepare("INSERT OR REPLACE INTO dream_log (path, reviewed_at, mtime_at_review) VALUES (?, ?, ?)"),
+  deleteDreamLog: memDb.prepare("DELETE FROM dream_log WHERE path = ?"),
+  needsDream: memDb.prepare(`
+    SELECT f.path, f.mtime, d.reviewed_at, d.mtime_at_review
+    FROM files f
+    LEFT JOIN dream_log d ON f.path = d.path
+    WHERE d.path IS NULL
+       OR f.mtime > d.mtime_at_review
+  `),
 };
 
 function indexMemory(relPath, fullPath) {
@@ -267,6 +309,8 @@ function indexMemory(relPath, fullPath) {
 function removeMemory(relPath) {
   memStmts.deleteFts.run(relPath);
   memStmts.deleteFile.run(relPath);
+  memStmts.deleteDreamLog.run(relPath);
+  memStmts.deleteLinks.run(relPath, relPath);
 }
 
 function syncMemories() {
@@ -537,7 +581,20 @@ server.tool(
     const content = readFile(filePath);
     if (content === null) return { content: [{ type: "text", text: `could not read: ${cat}/${file}` }] };
 
-    return { content: [{ type: "text", text: content }] };
+    const relPath = `${cat}/${t}`;
+    const linked = memStmts.getLinks.all(relPath, relPath);
+    let text = content;
+    if (linked.length > 0) {
+      const linkLines = linked.map(l => {
+        const other = l.path_a === relPath
+          ? `${l.name_b} [${l.cat_b}]`
+          : `${l.name_a} [${l.cat_a}]`;
+        return `- ${other}`;
+      });
+      text += `\n\n---\n## linked memories\n\n${linkLines.join("\n")}`;
+    }
+
+    return { content: [{ type: "text", text }] };
   }
 );
 
@@ -624,6 +681,11 @@ server.tool(
       return { content: [{ type: "text", text: "nothing to dream about — no memories yet" }] };
     }
 
+    // --- which memories need attention? ---
+    const needsReview = new Set(memStmts.needsDream.all().map(r => r.path));
+    const now = Date.now();
+    const ts = new Date().toISOString();
+
     const sections = [];
     const hasGit = ensureGitRepo();
 
@@ -639,11 +701,21 @@ server.tool(
       );
     }
 
-    // --- cross-links ---
+    if (needsReview.size === 0) {
+      const catCount = memStmts.categoryCounts.all().length;
+      sections.unshift(`# dream report\n\n${all.length} memories | ${catCount} categories | all clean — nothing needs review`);
+      return { content: [{ type: "text", text: sections.join("\n\n") }] };
+    }
+
+    // filter to only memories needing review
+    const toReview = all.filter(m => needsReview.has(m.path));
+
+    // --- cross-links (rebuild for reviewed memories) ---
     const links = [];
     const seen = new Set();
 
-    for (const mem of all) {
+    for (const mem of toReview) {
+      memStmts.deleteLinks.run(mem.path, mem.path);
       const terms = mem.name.replace(/[-_]/g, " ").split(/\s+/).filter(t => t.length > 3);
       if (terms.length === 0) continue;
       const q = terms.slice(0, 3).map(t => `"${t}"`).join(" OR ");
@@ -651,9 +723,11 @@ server.tool(
         const matches = memStmts.search.all(q, 5, 0);
         for (const m of matches) {
           if (m.path === mem.path || m.category === mem.category) continue;
-          const key = [mem.path, m.path].sort().join("|");
+          const [a, b] = [mem.path, m.path].sort();
+          const key = `${a}|${b}`;
           if (seen.has(key)) continue;
           seen.add(key);
+          memStmts.upsertLink.run(a, b, m.rank, ts);
           links.push({ a: `${mem.name} [${mem.category}]`, b: `${m.name} [${m.category}]`, rank: m.rank });
         }
       } catch { /* skip bad queries */ }
@@ -662,13 +736,12 @@ server.tool(
     if (links.length > 0) {
       links.sort((a, b) => a.rank - b.rank);
       const top = links.slice(0, 10);
-      sections.push(`## cross-links (${links.length} found, top ${top.length})\n\n${top.map(l => `- ${l.a} ↔ ${l.b}`).join("\n")}`);
+      sections.push(`## new cross-links (${links.length} found, top ${top.length})\n\n${top.map(l => `- ${l.a} ↔ ${l.b}`).join("\n")}`);
     }
 
-    // --- stale memories ---
-    const now = Date.now();
+    // --- stale memories (only unreviewed) ---
     const STALE_DAYS = 90;
-    const stale = all
+    const stale = toReview
       .filter(m => m.date && !isNaN(new Date(m.date)))
       .map(m => ({ ...m, age: Math.floor((now - new Date(m.date).getTime()) / 86400000) }))
       .filter(m => m.age >= STALE_DAYS)
@@ -680,31 +753,31 @@ server.tool(
       ).join("\n")}`);
     }
 
-    // --- quality issues ---
-    const issues = all.filter(m => !m.date || !m.description);
+    // --- quality issues (only unreviewed) ---
+    const issues = toReview.filter(m => !m.date || !m.description);
     if (issues.length > 0) {
       sections.push(`## quality issues\n\n${issues.map(m =>
         `- ${m.name} [${m.category}]: ${!m.date ? "no date" : "no description"}`
       ).join("\n")}`);
     }
 
-    // --- full inventory ---
-    const groups = new Map();
-    for (const r of all) {
-      if (!groups.has(r.category)) groups.set(r.category, []);
-      groups.get(r.category).push(r);
-    }
-    const inv = [];
-    for (const [cat, entries] of groups) {
-      inv.push(`**${cat}** (${entries.length})`);
-      for (const e of entries) inv.push(`  - ${e.name}${e.date ? ` ${e.date}` : ""}: ${e.description}`);
-    }
-    sections.push(`## inventory\n\n${inv.join("\n")}`);
+    // --- needs review ---
+    const reviewLines = toReview.map(m => {
+      const date = m.date ? ` ${m.date}` : "";
+      return `- ${m.name} [${m.category}]${date}: ${m.description}`;
+    });
+    sections.push(`## needs review (${toReview.length} memories)\n\n${reviewLines.join("\n")}`);
 
     // --- header ---
     const catCount = memStmts.categoryCounts.all().length;
-    const summary = `${all.length} memories | ${catCount} categories | ${links.length} cross-links | ${stale.length} stale`;
-    sections.unshift(`# dream report\n\n${summary}\n\nReview below. Use grug-write to update, grug-delete to remove. Check stale memories for accuracy. Add cross-reference notes where useful.`);
+    const summary = `${all.length} memories | ${catCount} categories | ${toReview.length} need review | ${links.length} cross-links | ${stale.length} stale`;
+    sections.unshift(`# dream report\n\n${summary}\n\nOnly showing memories that are new or changed since last dream. Use grug-write to update, grug-delete to remove.`);
+
+    // --- mark reviewed ---
+    for (const m of toReview) {
+      const file = memStmts.getFile.get(m.path);
+      if (file) memStmts.upsertDreamLog.run(m.path, ts, file.mtime);
+    }
 
     return { content: [{ type: "text", text: sections.join("\n\n") }] };
   }
