@@ -2,6 +2,11 @@
   "name": "grug-brain",
   "version": "2.0.0",
   "description": "Persistent memory for LLMs with search, docs, and dreaming. SQLite FTS5, markdown storage, git-tracked history.",
+  "author": {
+    "name": "r"
+  },
+  "license": "MIT",
+  "keywords": ["memory", "search", "fts5", "knowledge-base", "mcp", "dreaming"],
   "mcpServers": {
     "grug-brain": {
       "command": "bun",
