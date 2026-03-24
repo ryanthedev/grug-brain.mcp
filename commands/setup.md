@@ -61,7 +61,7 @@ Ask the user: **"Do you want to connect a shared brain? This syncs memories acro
 
 If yes:
 
-1. Ask for the remote repo URL (e.g., `git@github.com:user/grug-memories.git`)
+1. Ask for the remote repo URL (e.g., `https://github.com/user/grug-memories.git` or `git@github.com:user/grug-memories.git`)
 2. Initialize the memory git repo if needed:
    ```bash
    MEMORY_DIR="${MEMORY_DIR:-${CLAUDE_PLUGIN_ROOT}/memories}"
