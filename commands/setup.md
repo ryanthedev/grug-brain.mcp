@@ -89,7 +89,17 @@ Tell the user: sync runs automatically every 60 seconds while the MCP server is 
 
 If no, skip. Sync can be configured later by re-running `/setup`.
 
-## 7. Summary
+## 7. Shared docs
+
+Ask the user: **"Do you want to ingest shared docs? This gives grug searchable reference documentation."**
+
+If yes, ask for a GitHub repo URL containing docs (e.g., `github:org/grug-docs`). Then run `/ingest` with that source.
+
+If the user doesn't have a docs repo, suggest they can ingest individual doc sets later with `/ingest`.
+
+Docs do NOT sync via the shared brain — they are ingested locally per machine from a shared source. This keeps the memory sync lightweight.
+
+## 8. Summary
 
 Report:
 - Bun: version or missing
