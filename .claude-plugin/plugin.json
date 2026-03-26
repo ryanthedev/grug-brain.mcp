@@ -1,7 +1,7 @@
 {
   "name": "grug-brain",
-  "version": "2.0.0",
-  "description": "Persistent memory for LLMs with search, docs, and dreaming. SQLite FTS5, markdown storage, git-tracked history.",
+  "version": "2.1.0",
+  "description": "Persistent memory for LLMs with search, multi-source docs, and dreaming. SQLite FTS5, markdown storage, git-tracked history.",
   "author": {
     "name": "r"
   },

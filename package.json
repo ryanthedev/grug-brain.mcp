@@ -1,6 +1,6 @@
 {
   "name": "grug-brain-mcp",
-  "version": "2.0.0",
+  "version": "2.1.0",
   "type": "module",
   "description": "Persistent memory MCP server for LLMs. SQLite FTS5 search, markdown storage.",
   "main": "server.js",
