@@ -49,7 +49,7 @@ If this returns a valid JSON response with `serverInfo`, the server is healthy. 
 Check if the memories directory has git initialized:
 
 ```bash
-MEMORY_DIR="${MEMORY_DIR:-${CLAUDE_PLUGIN_ROOT}/memories}"
+MEMORY_DIR="${MEMORY_DIR:-$HOME/.grug-brain/memories}"
 cd "$MEMORY_DIR" && git rev-parse --git-dir 2>/dev/null
 ```
 
@@ -64,7 +64,7 @@ If yes:
 1. Ask for the remote repo URL (e.g., `https://github.com/user/grug-memories.git` or `git@github.com:user/grug-memories.git`)
 2. Initialize the memory git repo if needed:
    ```bash
-   MEMORY_DIR="${MEMORY_DIR:-${CLAUDE_PLUGIN_ROOT}/memories}"
+   MEMORY_DIR="${MEMORY_DIR:-$HOME/.grug-brain/memories}"
    cd "$MEMORY_DIR"
    git init 2>/dev/null
    ```

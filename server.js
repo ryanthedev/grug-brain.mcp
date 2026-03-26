@@ -11,7 +11,10 @@ import { fileURLToPath } from "url";
 import { execFileSync } from "child_process";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
-const MEMORY_DIR = process.env.MEMORY_DIR || join(__dirname, "memories");
+const MEMORY_DIR = process.env.MEMORY_DIR || join(
+  process.env.HOME || process.env.USERPROFILE || __dirname,
+  ".grug-brain", "memories"
+);
 // DOCS_DIRS supports two formats:
 //   /path/to/dir           — each subdirectory is a category
 //   name=/path/to/dir      — entire directory is one category named "name"

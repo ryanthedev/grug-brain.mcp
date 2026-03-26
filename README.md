@@ -88,7 +88,7 @@ memories/
 
 | Variable | Default | Purpose |
 |----------|---------|---------|
-| `MEMORY_DIR` | `./memories/` | Where memories live |
+| `MEMORY_DIR` | `~/.grug-brain/memories/` | Where memories live (survives plugin updates) |
 | `DOCS_DIRS` | `./docs/` | Colon-separated list of doc directories. Supports `name=path` for named categories. Also accepts `DOCS_DIR` for backwards compatibility. |
 
 ## License
