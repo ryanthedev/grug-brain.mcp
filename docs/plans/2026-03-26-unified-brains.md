@@ -78,7 +78,7 @@ Refactor server.js in place, phase by phase. Each phase produces a working serve
 **Goal:** Replace the two separate databases (`memDb` + `docsDb`) with a single FTS5 database at `~/.grug-brain/grug.db` that indexes all brains.
 
 **Scope:**
-- IN: Unified `brain_fts` table with `brain` column, unified `files` table with `(brain, path)` key, single `syncBrain()` function, schema migration (version bump forces reindex), merge `walkMemoryFiles`/`walkDocFiles` into one walker
+- IN: Unified `brain_fts` table with `brain` column, unified `files` table with `(brain, path)` key, single `syncBrain()` function, schema migration (version bump forces reindex), merge `walkMemoryFiles`/`walkDocFiles` into one walker, audit and update `cross_links` table schema to include brain column or `brain:path` prefix
 - OUT: Tool changes (still use old stmts interface via adapter), git changes
 
 **Constraints:**
@@ -86,6 +86,10 @@ Refactor server.js in place, phase by phase. Each phase produces a working serve
 - DB location: `~/.grug-brain/grug.db` (not inside any brain directory)
 - `category` for flat brains = brain name
 - Old DB files left as orphans (already gitignored)
+- `syncBrain()` is not lock-aware by design — callers in Phase 3 apply the sync lock before calling it
+
+**Approach notes:**
+- Flat brains use the brain name as the category value (user decision, not derivable from code)
 
 **File hints:**
 - `server.js` lines 226-478 — both DB sections
@@ -125,7 +129,6 @@ Refactor server.js in place, phase by phase. Each phase produces a working serve
 
 **Approach notes:**
 - Conflict strategy chosen via 4-agent analysis: save to conflicts/ category (not git branches, not last-write-wins, not append-only)
-- JS is single-threaded but setInterval callbacks interleave with tool handlers — sync lock is a simple boolean, not a mutex
 
 **File hints:**
 - `server.js` lines 68-153 — git section
@@ -165,14 +168,14 @@ Refactor server.js in place, phase by phase. Each phase produces a working serve
 **File hints:**
 - `server.js` lines 535-900 — all tool definitions
 
-**Depends on:** Phase 2 | **Unlocks:** Phase 5
+**Depends on:** Phase 2, Phase 3 | **Unlocks:** Phase 5
 
 **Done when:**
 - [ ] `grug-write` accepts `brain` param, defaults to primary, blocks read-only
 - [ ] `grug-read` lists brains (no args), categories (brain), files (brain+category), content (brain+category+path)
 - [ ] `grug-search` returns results with brain field
 - [ ] `grug-delete` accepts `brain` param, blocks read-only
-- [ ] `grug-recall` accepts `brain` param
+- [ ] `grug-recall` accepts `brain` param, writes recall.md to primary brain directory
 - [ ] `grug-docs` kept as alias
 
 **Difficulty:** MEDIUM
@@ -203,7 +206,7 @@ Refactor server.js in place, phase by phase. Each phase produces a working serve
 **Done when:**
 - [ ] Dream commits pending changes per writable brain
 - [ ] Dream surfaces `conflicts/` entries with resolution guidance
-- [ ] Dream uses sync lock
+- [ ] Concurrent sync and dream operations do not corrupt git state
 - [ ] `/setup` creates/manages `brains.json`
 - [ ] `/ingest` adds brain entries to config
 - [ ] README documents `brains.json` format
@@ -257,9 +260,8 @@ Refactor server.js in place, phase by phase. Each phase produces a working serve
 
 ## Notes
 
-- The `cross_links` table in the current dream tool stores paths. These will need `brain:path` prefixing or a brain column. Pre-gate should discover the exact schema.
-- The `recall.md` file is currently written to MEMORY_DIR. Under unified brains it should go to the primary brain's directory.
 - Old `.grug-brain.db` and `.docs.db` files will be orphaned after migration. Consider adding a startup log noting they can be deleted.
+- cross_links schema update assigned to Phase 2. recall.md relocation assigned to Phase 4.
 
 ---
 
