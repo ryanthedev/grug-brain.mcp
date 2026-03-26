@@ -11,7 +11,7 @@
 import { mkdirSync, writeFileSync, existsSync } from "fs";
 import { join } from "path";
 
-const DOCS_DIR = join(import.meta.dir, "..", "docs");
+const DOCS_DIR = process.env.DOCS_DIR || join(import.meta.dir, "..", "..", "grug-docs");
 const DELAY_MS = 100; // polite delay between fetches
 
 function slugify(name: string): string {

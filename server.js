@@ -12,8 +12,23 @@ import { execFileSync } from "child_process";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const MEMORY_DIR = process.env.MEMORY_DIR || join(__dirname, "memories");
-const DOCS_DIR = process.env.DOCS_DIR || join(__dirname, "docs");
+// DOCS_DIRS supports two formats:
+//   /path/to/dir           — each subdirectory is a category
+//   name=/path/to/dir      — entire directory is one category named "name"
+const DOCS_ENTRIES = (process.env.DOCS_DIRS || process.env.DOCS_DIR || join(__dirname, "docs"))
+  .split(":")
+  .map(entry => {
+    const eq = entry.indexOf("=");
+    if (eq > 0) {
+      const name = entry.slice(0, eq);
+      const dir = resolve(entry.slice(eq + 1));
+      return { type: "named", name, dir };
+    }
+    return { type: "multi", dir: resolve(entry) };
+  })
+  .filter(e => existsSync(e.dir));
 const PAGE_SIZE = 50;
+const BROWSE_PAGE_SIZE = 100;
 const SEARCH_PAGE_SIZE = 20;
 
 // --- helpers ---
@@ -341,9 +356,16 @@ let docsDb = null;
 let docStmts = null;
 let docsTotal = 0;
 
-if (existsSync(DOCS_DIR) && getCategories(DOCS_DIR).length > 0) {
-  docsDb = initDb(
-    join(DOCS_DIR, ".docs.db"), 1, "docs_fts",
+// Map category -> base dir for resolving file reads
+const docCatDirs = new Map();
+
+const hasAnyDocs = DOCS_ENTRIES.some(e =>
+  e.type === "named" || getCategories(e.dir).length > 0
+);
+
+if (hasAnyDocs) {
+  const dbPath = join(MEMORY_DIR, ".docs.db");
+  docsDb = initDb(dbPath, 2, "docs_fts",
     "path UNINDEXED, category, title, description, body"
   );
 
@@ -365,6 +387,8 @@ if (existsSync(DOCS_DIR) && getCategories(DOCS_DIR).length > 0) {
       LIMIT ? OFFSET ?
     `),
     categoryCounts: docsDb.prepare("SELECT category, COUNT(*) as count FROM docs_fts GROUP BY category ORDER BY category"),
+    listByCategory: docsDb.prepare("SELECT path, title, description FROM docs_fts WHERE category = ? ORDER BY title LIMIT ? OFFSET ?"),
+    countByCategory: docsDb.prepare("SELECT COUNT(*) as total FROM docs_fts WHERE category = ?"),
   };
 
   function indexDoc(relPath, fullPath) {
@@ -385,20 +409,55 @@ if (existsSync(DOCS_DIR) && getCategories(DOCS_DIR).length > 0) {
     docStmts.deleteFile.run(relPath);
   }
 
+  function resolveDocPath(relPath) {
+    const cat = relPath.split("/")[0];
+    const baseDir = docCatDirs.get(cat);
+    if (baseDir) {
+      // named entries: relPath is "cat/file", but files live at baseDir/file
+      const withinCat = relPath.slice(cat.length + 1);
+      const full = join(baseDir, withinCat);
+      if (existsSync(full)) return full;
+      // multi entries: relPath maps directly
+      const full2 = join(baseDir, relPath);
+      if (existsSync(full2)) return full2;
+    }
+    return null;
+  }
+
   function syncDocs() {
     const indexed = new Set(docStmts.allFiles.all().map(r => r.path));
     const onDisk = new Set();
     let added = 0, updated = 0, removed = 0;
-    for (const cat of getCategories(DOCS_DIR)) {
-      for (const fullPath of walkDocFiles(join(DOCS_DIR, cat))) {
-        const relPath = relative(DOCS_DIR, fullPath);
-        onDisk.add(relPath);
-        const row = docStmts.getFile.get(relPath);
-        const mtime = statSync(fullPath).mtimeMs;
-        if (!row) { indexDoc(relPath, fullPath); added++; }
-        else if (row.mtime !== mtime) { indexDoc(relPath, fullPath); updated++; }
+
+    for (const entry of DOCS_ENTRIES) {
+      if (entry.type === "named") {
+        // entire directory is one category
+        docCatDirs.set(entry.name, entry.dir);
+        for (const fullPath of walkDocFiles(entry.dir)) {
+          const relFile = relative(entry.dir, fullPath);
+          const relPath = `${entry.name}/${relFile}`;
+          onDisk.add(relPath);
+          const row = docStmts.getFile.get(relPath);
+          const mtime = statSync(fullPath).mtimeMs;
+          if (!row) { indexDoc(relPath, fullPath); added++; }
+          else if (row.mtime !== mtime) { indexDoc(relPath, fullPath); updated++; }
+        }
+      } else {
+        // each subdirectory is a category
+        for (const cat of getCategories(entry.dir)) {
+          docCatDirs.set(cat, entry.dir);
+          for (const fullPath of walkDocFiles(join(entry.dir, cat))) {
+            const relPath = relative(entry.dir, fullPath);
+            onDisk.add(relPath);
+            const row = docStmts.getFile.get(relPath);
+            const mtime = statSync(fullPath).mtimeMs;
+            if (!row) { indexDoc(relPath, fullPath); added++; }
+            else if (row.mtime !== mtime) { indexDoc(relPath, fullPath); updated++; }
+          }
+        }
       }
     }
+
     for (const path of indexed) {
       if (!onDisk.has(path)) { removeDoc(path); removed++; }
     }
@@ -408,7 +467,7 @@ if (existsSync(DOCS_DIR) && getCategories(DOCS_DIR).length > 0) {
   const docSync = syncDocs();
   docsTotal = docStmts.allFiles.all().length;
   const catSummary = docStmts.categoryCounts.all().map(r => `${r.category}(${r.count})`).join(", ");
-  process.stderr.write(`grug: docs ${docsTotal} files in [${catSummary}]`);
+  process.stderr.write(`grug: docs ${docsTotal} files in [${catSummary}] from ${DOCS_ENTRIES.length} source(s)`);
   if (docSync.added || docSync.updated || docSync.removed) {
     process.stderr.write(` — +${docSync.added} ~${docSync.updated} -${docSync.removed}`);
   }
@@ -797,24 +856,32 @@ if (docStmts) {
     async ({ category, path: target, page }) => {
       if (!category && !target) {
         const rows = docStmts.categoryCounts.all();
-        if (rows.length === 0) return { content: [{ type: "text", text: `no docs found in ${DOCS_DIR}` }] };
+        if (rows.length === 0) return { content: [{ type: "text", text: "no docs found" }] };
         const lines = rows.map(r => `  ${r.category}  (${r.count} docs)`);
         return { content: [{ type: "text", text: `${rows.length} doc categories\n\n${lines.join("\n")}` }] };
       }
 
       if (target) {
-        let filePath = join(DOCS_DIR, target);
-        if (!existsSync(filePath)) filePath = resolve(target);
-        if (!existsSync(filePath)) return { content: [{ type: "text", text: `file not found: ${target}` }] };
+        let filePath = resolveDocPath(target);
+        if (!filePath) filePath = resolve(target);
+        if (!filePath || !existsSync(filePath)) return { content: [{ type: "text", text: `file not found: ${target}` }] };
         const content = readFile(filePath);
         if (content === null) return { content: [{ type: "text", text: `could not read: ${target}` }] };
         return { content: [{ type: "text", text: paginate(content, page) }] };
       }
 
-      const rows = docStmts.search.all(`"${category}"*`, 30, 0);
-      if (rows.length === 0) return { content: [{ type: "text", text: `no docs in "${category}"` }] };
+      const p = Math.max(1, page || 1);
+      const limit = BROWSE_PAGE_SIZE;
+      const offset = (p - 1) * limit;
+      const { total } = docStmts.countByCategory.get(category);
+      if (total === 0) return { content: [{ type: "text", text: `no docs in "${category}"` }] };
+      const rows = docStmts.listByCategory.all(category, limit, offset);
       const lines = rows.map(r => `- [${r.title}](${r.path}): ${r.description || ""}`);
-      return { content: [{ type: "text", text: `# ${category} (${rows.length} docs)\n\n${lines.join("\n")}` }] };
+      const totalPages = Math.ceil(total / limit);
+      const paging = totalPages > 1
+        ? `\n--- page ${p}/${totalPages} (${total} docs) | page:${p + 1} for more ---`
+        : "";
+      return { content: [{ type: "text", text: `# ${category} (${total} docs)\n\n${lines.join("\n")}${paging}` }] };
     }
   );
 }
