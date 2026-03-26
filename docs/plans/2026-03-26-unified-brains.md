@@ -219,21 +219,26 @@ Refactor server.js in place, phase by phase. Each phase produces a working serve
 
 ## Test Coverage
 
-**Level:** Per-phase manual verification
+**Level:** Automated (bun:test)
 
 ## Test Plan
 
-- [ ] Server starts with `brains.json` config
-- [ ] Server starts with env vars only (backwards compat)
-- [ ] `grug-search` returns results from multiple brains
-- [ ] `grug-write` to primary brain works
-- [ ] `grug-write` to named writable brain works
-- [ ] `grug-write` to read-only brain returns error
-- [ ] `grug-read` with no args lists all brains
-- [ ] Simulate rebase conflict: verify conflict file created in `conflicts/` category
-- [ ] Verify network failure doesn't trigger conflict resolution
-- [ ] Dream surfaces conflict files
-- [ ] Sync lock prevents concurrent git operations
+- [ ] Unit: `loadBrains()` parses brains.json correctly
+- [ ] Unit: `loadBrains()` builds from env vars when no config file
+- [ ] Unit: `loadBrains()` rejects duplicate names, missing primary
+- [ ] Unit: `loadBrains()` expands `~` in paths
+- [ ] Unit: `syncBrain()` indexes flat and category-based brains
+- [ ] Unit: `syncBrain()` removes files no longer on disk
+- [ ] Unit: unified search returns results with brain field
+- [ ] Unit: write to read-only brain returns error
+- [ ] Unit: write to primary brain creates file and indexes it
+- [ ] Unit: write to named writable brain works
+- [ ] Unit: delete from read-only brain returns error
+- [ ] Integration: conflict detection — `.git/REBASE_HEAD` triggers conflict save
+- [ ] Integration: conflict file created in `conflicts/` category with correct frontmatter
+- [ ] Integration: network failure (no REBASE_HEAD) skips conflict resolution
+- [ ] Integration: sync lock prevents overlapping git operations
+- [ ] Integration: dream surfaces entries in `conflicts/` category
 
 ---
 
