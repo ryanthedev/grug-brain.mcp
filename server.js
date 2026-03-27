@@ -669,7 +669,7 @@ function searchAll(query, page = 1) {
 // SERVER + TOOLS
 // ============================================================
 
-const server = new McpServer({ name: "grug-brain", version: "2.0.0" });
+const server = new McpServer({ name: "grug-brain", version: "3.0.0" });
 
 // --- grug-write ---
 
@@ -929,70 +929,134 @@ server.tool(
 
 // --- grug-dream ---
 
+// Collect all memories across all brains that need review.
+function collectAllMemories() {
+  const all = [];
+  for (const brain of brains) {
+    for (const row of stmts.recall.all(brain.name)) {
+      all.push({ ...row, brainName: brain.name });
+    }
+  }
+  return all;
+}
+
+// Commit pending changes for a single writable brain with git.
+// Acquires sync lock to prevent concurrent git operations.
+// Returns the git log string, or null if git is unavailable.
+function dreamCommitBrain(brain) {
+  if (!ensureGitRepo(brain)) return null;
+  if (!acquireSyncLock(brain)) return null;
+  try {
+    syncGitExclude(brain);
+    git(brain, "add", "-A");
+    git(brain, "commit", "-m", "grug: dream sync", "--quiet");
+    return git(brain, "log", "--oneline", "--name-status", "-15", "--", ".");
+  } finally {
+    releaseSyncLock(brain);
+  }
+}
+
 server.tool(
   "grug-dream",
-  "Dream: review memory health. Commits pending changes to git, shows history, finds cross-links across categories, flags stale memories. Use with /loop for periodic maintenance.",
+  "Dream: review memory health across all brains. Commits pending changes to git, shows history, finds cross-links, flags stale memories and conflicts. Use with /loop for periodic maintenance.",
   {},
   async () => {
-    syncBrain(primaryBrain);
-    const all = stmts.recall.all(primaryBrain.name);
+    // Sync all brains before inspecting
+    for (const brain of brains) syncBrain(brain);
+
+    const all = collectAllMemories();
     if (all.length === 0) {
       return { content: [{ type: "text", text: "nothing to dream about — no memories yet" }] };
     }
 
-    // --- which memories need attention? ---
-    const needsReview = new Set(stmts.needsDream.all(primaryBrain.name).map(r => r.path));
     const now = Date.now();
     const ts = new Date().toISOString();
-
     const sections = [];
-    const hasGit = ensureGitRepo(primaryBrain);
 
-    // --- commit pending & show history ---
-    if (hasGit) {
-      syncGitExclude(primaryBrain);
-      git(primaryBrain, "add", "-A");
-      git(primaryBrain, "commit", "-m", "grug: dream sync", "--quiet");
-      const log = git(primaryBrain, "log", "--oneline", "--name-status", "-15", "--", ".");
-      sections.push(log
-        ? `## recent history\n\n\`\`\`\n${log}\n\`\`\``
-        : "## recent history\n\nno commits yet"
-      );
+    // --- commit pending changes per writable brain with git ---
+    const writableGitBrains = brains.filter(b => b.writable && ensureGitRepo(b));
+    if (writableGitBrains.length > 0) {
+      const historyLines = [];
+      for (const brain of writableGitBrains) {
+        const log = dreamCommitBrain(brain);
+        if (log) {
+          historyLines.push(`### ${brain.name}\n\n\`\`\`\n${log}\n\`\`\``);
+        } else {
+          historyLines.push(`### ${brain.name}\n\nno commits yet`);
+        }
+      }
+      sections.push(`## recent history\n\n${historyLines.join("\n\n")}`);
     }
 
-    if (needsReview.size === 0) {
-      const catCount = stmts.categoryCounts.all(primaryBrain.name).length;
-      sections.unshift(`# dream report\n\n${all.length} memories | ${catCount} categories | all clean — nothing needs review`);
+    // --- conflicts: entries in the conflicts/ category ---
+    const conflictRows = stmts.recallByCategory.all(primaryBrain.name, "conflicts");
+    if (conflictRows.length > 0) {
+      const conflictLines = conflictRows.map(r => {
+        // Read frontmatter for original_path, original_brain, hostname, date
+        const filePath = join(primaryBrain.dir, r.path);
+        const content = readFile(filePath);
+        const fm = content ? extractFrontmatter(content) : {};
+        const origin = fm.original_path
+          ? `${fm.original_brain || "?"}/${fm.original_path}`
+          : r.path;
+        const host = fm.hostname ? ` (from ${fm.hostname})` : "";
+        const date = fm.date ? ` — ${fm.date}` : "";
+        return `- **${r.name}**${date}${host}: original: \`${origin}\`\n  Resolve: read with \`grug-read brain:${primaryBrain.name} category:conflicts path:${basename(r.path, ".md")}\`, then \`grug-write\` to the original location and \`grug-delete\` the conflict entry.`;
+      });
+      sections.push(`## conflicts (${conflictRows.length})\n\nThese files had git merge conflicts and were saved here. Review each, write the correct version to the original location, then delete the conflict entry.\n\n${conflictLines.join("\n\n")}`);
+    }
+
+    // --- which memories need attention? ---
+    const needsReview = new Set();
+    for (const brain of brains) {
+      for (const row of stmts.needsDream.all(brain.name)) {
+        needsReview.add(`${brain.name}:${row.path}`);
+      }
+    }
+
+    if (needsReview.size === 0 && conflictRows.length === 0) {
+      let totalFiles = 0;
+      let totalCats = 0;
+      for (const brain of brains) {
+        totalFiles += stmts.countForBrain.get(brain.name).count;
+        totalCats += stmts.categoryCounts.all(brain.name).length;
+      }
+      sections.unshift(`# dream report\n\n${totalFiles} memories | ${totalCats} categories | all clean — nothing needs review`);
       return { content: [{ type: "text", text: sections.join("\n\n") }] };
     }
 
-    // filter to only memories needing review
-    const toReview = all.filter(m => needsReview.has(m.path));
+    // Filter to only memories needing review
+    const toReview = all.filter(m => needsReview.has(`${m.brainName}:${m.path}`));
 
-    // --- cross-links (rebuild for reviewed memories) ---
+    // --- cross-links across all brains (rebuild for reviewed memories) ---
     const links = [];
     const seen = new Set();
 
     for (const mem of toReview) {
-      stmts.deleteLinks.run(primaryBrain.name, mem.path, primaryBrain.name, mem.path);
+      stmts.deleteLinks.run(mem.brainName, mem.path, mem.brainName, mem.path);
       const terms = mem.name.replace(/[-_]/g, " ").split(/\s+/).filter(t => t.length > 3);
       if (terms.length === 0) continue;
       const q = terms.slice(0, 3).map(t => `"${t}"`).join(" OR ");
       try {
         const matches = stmts.search.all(q, 5, 0);
         for (const m of matches) {
-          if (m.path === mem.path || m.category === mem.category) continue;
-          // Sort by path for stable primary key; track which brain belongs to which
-          const memBrain = primaryBrain.name;
-          const mBrain = m.brain || primaryBrain.name;
-          const [[pA, bA], [pB, bB]] = mem.path <= m.path
-            ? [[mem.path, memBrain], [m.path, mBrain]]
-            : [[m.path, mBrain], [mem.path, memBrain]];
+          if (m.path === mem.path && m.brain === mem.brainName) continue;
+          if (m.category === mem.category && m.brain === mem.brainName) continue;
+          // Sort by brain+path for stable primary key
+          const [[pA, bA], [pB, bB]] = `${mem.brainName}:${mem.path}` <= `${m.brain}:${m.path}`
+            ? [[mem.path, mem.brainName], [m.path, m.brain]]
+            : [[m.path, m.brain], [mem.path, mem.brainName]];
           const key = `${bA}:${pA}|${bB}:${pB}`;
           if (seen.has(key)) continue;
           seen.add(key);
           stmts.upsertLink.run(bA, pA, bB, pB, m.rank, ts);
-          links.push({ a: `${mem.name} [${mem.category}]`, b: `${m.name} [${m.category}]`, rank: m.rank });
+          const brainTagA = bA !== primaryBrain.name ? ` [${bA}]` : "";
+          const brainTagB = bB !== primaryBrain.name ? ` [${bB}]` : "";
+          links.push({
+            a: `${mem.name} [${mem.category}]${brainTagA}`,
+            b: `${m.name} [${m.category}]${brainTagB}`,
+            rank: m.rank,
+          });
         }
       } catch { /* skip bad queries */ }
     }
@@ -1012,35 +1076,44 @@ server.tool(
       .sort((a, b) => b.age - a.age);
 
     if (stale.length > 0) {
-      sections.push(`## stale (${stale.length} memories > ${STALE_DAYS} days)\n\n${stale.map(s =>
-        `- ${s.name} [${s.category}] — ${s.age}d (${s.date}): ${s.description}`
-      ).join("\n")}`);
+      sections.push(`## stale (${stale.length} memories > ${STALE_DAYS} days)\n\n${stale.map(s => {
+        const brainTag = s.brainName !== primaryBrain.name ? ` [${s.brainName}]` : "";
+        return `- ${s.name} [${s.category}]${brainTag} — ${s.age}d (${s.date}): ${s.description}`;
+      }).join("\n")}`);
     }
 
     // --- quality issues (only unreviewed) ---
     const issues = toReview.filter(m => !m.date || !m.description);
     if (issues.length > 0) {
-      sections.push(`## quality issues\n\n${issues.map(m =>
-        `- ${m.name} [${m.category}]: ${!m.date ? "no date" : "no description"}`
-      ).join("\n")}`);
+      sections.push(`## quality issues\n\n${issues.map(m => {
+        const brainTag = m.brainName !== primaryBrain.name ? ` [${m.brainName}]` : "";
+        return `- ${m.name} [${m.category}]${brainTag}: ${!m.date ? "no date" : "no description"}`;
+      }).join("\n")}`);
     }
 
     // --- needs review ---
     const reviewLines = toReview.map(m => {
       const date = m.date ? ` ${m.date}` : "";
-      return `- ${m.name} [${m.category}]${date}: ${m.description}`;
+      const brainTag = m.brainName !== primaryBrain.name ? ` [${m.brainName}]` : "";
+      return `- ${m.name} [${m.category}]${brainTag}${date}: ${m.description}`;
     });
     sections.push(`## needs review (${toReview.length} memories)\n\n${reviewLines.join("\n")}`);
 
     // --- header ---
-    const catCount = stmts.categoryCounts.all(primaryBrain.name).length;
-    const summary = `${all.length} memories | ${catCount} categories | ${toReview.length} need review | ${links.length} cross-links | ${stale.length} stale`;
+    let totalFiles = 0;
+    let totalCats = 0;
+    for (const brain of brains) {
+      totalFiles += stmts.countForBrain.get(brain.name).count;
+      totalCats += stmts.categoryCounts.all(brain.name).length;
+    }
+    const conflictNote = conflictRows.length > 0 ? ` | ${conflictRows.length} conflicts` : "";
+    const summary = `${totalFiles} memories | ${totalCats} categories | ${toReview.length} need review | ${links.length} cross-links | ${stale.length} stale${conflictNote}`;
     sections.unshift(`# dream report\n\n${summary}\n\nOnly showing memories that are new or changed since last dream. Use grug-write to update, grug-delete to remove.`);
 
     // --- mark reviewed ---
     for (const m of toReview) {
-      const file = stmts.getFile.get(primaryBrain.name, m.path);
-      if (file) stmts.upsertDreamLog.run(primaryBrain.name, m.path, ts, file.mtime);
+      const file = stmts.getFile.get(m.brainName, m.path);
+      if (file) stmts.upsertDreamLog.run(m.brainName, m.path, ts, file.mtime);
     }
 
     return { content: [{ type: "text", text: sections.join("\n\n") }] };

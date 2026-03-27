@@ -4,7 +4,7 @@ argument-hint: [source]
 allowed-tools: Bash, Read, Grep, Glob, Write
 ---
 
-Add documentation to grug-brain's `docs/` directory at `${CLAUDE_PLUGIN_ROOT}/docs/`. Each doc set goes in a category subdirectory: `docs/<category>/`. Docs are indexed by FTS5 on server restart and searchable via `grug-search` and `grug-docs`.
+Add documentation to grug-brain as a brain entry. Each doc set lives in a directory that grug-brain indexes on startup. Docs are searchable via `grug-search` and `grug-read`.
 
 ## 1. Determine the source
 
@@ -19,28 +19,32 @@ Add documentation to grug-brain's `docs/` directory at `${CLAUDE_PLUGIN_ROOT}/do
 
 Parse the GitHub source by splitting on `/` after `github:` — first two segments are owner/repo, the rest is the path within the repo.
 
-## 2. Pick a category name
+## 2. Pick a brain name and target directory
 
 Short, lowercase, hyphens only (e.g., `react-native`, `agentic-planning`).
 
 - If ingesting a full repo: derive from the repo name.
-- If ingesting a subfolder: use the first path segment as category (e.g., `agentic-planning` from `agentic-planning/extractions`).
+- If ingesting a subfolder: use the first path segment as the name (e.g., `agentic-planning` from `agentic-planning/extractions`).
 - Ask the user to confirm.
 
-## 3. Check for existing
+The target directory is where docs will live on disk. Default: `${CLAUDE_PLUGIN_ROOT}/docs/<brain-name>/`. Ask the user if they prefer a different location.
+
+## 3. Check for existing brain entry
+
+Check if a brain with this name already exists in `~/.grug-brain/brains.json`:
 
 ```bash
-ls ${CLAUDE_PLUGIN_ROOT}/docs/<category>/ 2>/dev/null | head -5
+cat ~/.grug-brain/brains.json 2>/dev/null
 ```
 
-If the category already exists, ask: update (overwrite), or cancel?
+If a brain with this name already exists, ask: update (overwrite files), or cancel?
 
 ## 4. Get the files
 
 ### Local path
 
 ```bash
-rsync -av --include='*/' --include='*.md' --include='*.mdx' --exclude='_*' --exclude='.*' --exclude='*' <source>/ ${CLAUDE_PLUGIN_ROOT}/docs/<category>/
+rsync -av --include='*/' --include='*.md' --include='*.mdx' --exclude='_*' --exclude='.*' --exclude='*' <source>/ <target-dir>/
 ```
 
 ### GitHub repo (full or subfolder)
@@ -60,7 +64,7 @@ Determine the source directory inside the clone:
 Copy the files, preserving structure relative to the source:
 
 ```bash
-rsync -av --include='*/' --include='*.md' --include='*.mdx' --exclude='_*' --exclude='.*' --exclude='*' /tmp/grug-ingest/<source-dir>/ ${CLAUDE_PLUGIN_ROOT}/docs/<category>/
+rsync -av --include='*/' --include='*.md' --include='*.mdx' --exclude='_*' --exclude='.*' --exclude='*' /tmp/grug-ingest/<source-dir>/ <target-dir>/
 rm -rf /tmp/grug-ingest
 ```
 
@@ -69,14 +73,42 @@ rm -rf /tmp/grug-ingest
 If zero files were copied, report the error and do not proceed. Check:
 
 ```bash
-find ${CLAUDE_PLUGIN_ROOT}/docs/<category> -name '*.md' -o -name '*.mdx' | wc -l
+find <target-dir> -name '*.md' -o -name '*.mdx' | wc -l
 ```
 
-## 5. Report
+## 5. Add brain entry to brains.json
+
+After files are in place, add (or update) the brain entry in `~/.grug-brain/brains.json`.
+
+Read the current config:
+
+```bash
+cat ~/.grug-brain/brains.json 2>/dev/null || echo '[]'
+```
+
+Add the new entry. Ingested docs brains are read-only and non-primary:
+
+```json
+{
+  "name": "<brain-name>",
+  "dir": "<target-dir>",
+  "primary": false,
+  "writable": false,
+  "flat": false,
+  "git": null
+}
+```
+
+If the directory structure is flat (all files at top level, no category subdirectories), use `"flat": true` instead.
+
+Write the updated array back to `~/.grug-brain/brains.json`. Preserve all existing entries — only add or replace the entry for this brain name.
+
+## 6. Report
 
 Tell the user:
 - How many files were added
-- The category name and source path
+- The brain name and target directory
+- The entry added to brains.json
 - Docs will be indexed on next MCP server restart (restart Claude Code or run `/setup`)
 
 ## Tips
@@ -85,3 +117,4 @@ Tell the user:
 - Use subfolder paths to ingest specific sections: `github:org/grug-docs/agentic-planning/extractions`
 - Prose-heavy guides and API references search well. Changelogs and auto-generated tables search poorly.
 - Porter stemming handles plurals and word forms automatically.
+- To remove a doc brain, delete its entry from `~/.grug-brain/brains.json` and restart the MCP server.
