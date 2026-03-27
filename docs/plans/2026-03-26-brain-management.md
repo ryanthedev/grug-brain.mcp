@@ -96,10 +96,10 @@ Re-read `brains.json` on tool calls to pick up external changes. `grug-config` t
 **Depends on:** Phase 1 | **Unlocks:** Phase 3
 
 **Done when:**
-- [ ] `/ingest` defaults to `~/.grug-brain/<name>/`
-- [ ] Brain entry includes `source` field with origin URL/path
+- [ ] `/ingest` target dir default no longer uses `${CLAUDE_PLUGIN_ROOT}`
+- [ ] Brain entry includes `source` field using existing `github:owner/repo/path` syntax
 - [ ] Re-ingesting existing brain without source arg uses stored source
-- [ ] `/setup` references `~/.grug-brain/` not plugin cache
+- [ ] `/setup` no longer references `${CLAUDE_PLUGIN_ROOT}/docs/` for brain storage
 
 **Difficulty:** LOW
 **Uncertainty:** None
@@ -118,6 +118,7 @@ Re-read `brains.json` on tool calls to pick up external changes. `grug-config` t
 **Constraints:**
 - Refresh is read-only: pull/copy only, never push
 - Minimum interval: 3600 seconds (1 hour) to avoid hammering upstream
+- Refresh skips brains where `writable: true` — writable brains use git sync, not refresh
 - Git sources: `git -C <dir> pull --ff-only` if the dir is already a git repo, otherwise shallow clone + rsync
 - Local sources: rsync from stored source path
 - If refresh fails (network, permissions): log warning, retry at next interval
@@ -132,10 +133,11 @@ Re-read `brains.json` on tool calls to pick up external changes. `grug-config` t
 
 **Done when:**
 - [ ] Brain with `refreshInterval: 86400` refreshes docs daily
-- [ ] Refresh reindexes the brain after pulling new content
+- [ ] After a scheduled refresh, newly added upstream docs appear in `grug-search` results
 - [ ] Minimum 1-hour interval enforced
 - [ ] Refresh failures logged, don't crash server
 - [ ] Brains without `refreshInterval` are not affected
+- [ ] A writable brain with `refreshInterval` set is not auto-refreshed
 
 **Difficulty:** MEDIUM
 **Uncertainty:** Git pull vs fresh clone decision for updates — ff-only may fail if upstream rebased
