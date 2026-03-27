@@ -77,16 +77,9 @@ Configure brains in `~/.grug-brain/brains.json`:
 
 **Flat brain** (`flat: true`): Files live directly in the directory, no category subdirectories. The brain name becomes the category. Read-only by default.
 
-### Backwards compatibility
+### First run
 
-If `~/.grug-brain/brains.json` is absent, grug-brain falls back to environment variables:
-
-| Variable | Default | Purpose |
-|----------|---------|---------|
-| `MEMORY_DIR` | `~/.grug-brain/memories/` | Primary memory brain directory |
-| `DOCS_DIRS` | — | Colon-separated doc directories. Supports `name=path` for flat brains. |
-
-Migrate to `brains.json` by running `/setup`.
+If `~/.grug-brain/brains.json` doesn't exist, grug-brain creates a default config with a single primary brain at `~/.grug-brain/memories/`. Run `/setup` to add more brains.
 
 ## Dreaming
 

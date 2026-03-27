@@ -93,51 +93,25 @@ function loadBrains() {
     return brains.filter(b => existsSync(b.dir));
   }
 
-  // No config file — build from env vars (backwards compat for existing users)
-  const brains = [];
-
-  // Primary brain from MEMORY_DIR
-  const memoryDir = resolve(expandHome(
-    process.env.MEMORY_DIR || join(home, ".grug-brain", "memories")
-  ));
-  brains.push({
-    name: "memories",
-    dir: memoryDir,
-    primary: true,
-    writable: true,
-    flat: false,
-    git: null,
-    syncInterval: 60,
-  });
-
-  // Doc brains from DOCS_DIRS / DOCS_DIR
-  // Supports two formats:
-  //   /path/to/dir           — each subdirectory is a category (multi brain)
-  //   name=/path/to/dir      — entire directory is one category named "name" (flat brain)
-  const docsRaw = process.env.DOCS_DIRS || process.env.DOCS_DIR || "";
-  if (docsRaw) {
-    for (const entry of docsRaw.split(":")) {
-      const eq = entry.indexOf("=");
-      if (eq > 0) {
-        const name = entry.slice(0, eq);
-        const dir = resolve(expandHome(entry.slice(eq + 1)));
-        brains.push({ name, dir, primary: false, writable: false, flat: true, git: null, syncInterval: 60 });
-      } else {
-        const dir = resolve(expandHome(entry));
-        const name = basename(dir);
-        brains.push({ name, dir, primary: false, writable: false, flat: false, git: null, syncInterval: 60 });
-      }
-    }
-  }
-
-  return brains.filter(b => existsSync(b.dir));
+  // No config file — create a default one
+  const defaultDir = join(home, ".grug-brain", "memories");
+  ensureDir(defaultDir);
+  const defaultConfig = {
+    brains: [
+      { name: "memories", dir: defaultDir, primary: true, writable: true }
+    ]
+  };
+  ensureDir(dirname(configPath));
+  writeFileSync(configPath, JSON.stringify(defaultConfig, null, 2) + "\n", "utf-8");
+  process.stderr.write(`grug: created default config at ${configPath}\n`);
+  return [{ name: "memories", dir: defaultDir, primary: true, writable: true, flat: false, git: null, syncInterval: 60 }];
 }
 
 const brains = loadBrains();
 const primaryBrain = brains.find(b => b.primary);
 
 if (!primaryBrain) {
-  process.stderr.write("grug: fatal — no primary brain directory found. Check MEMORY_DIR or ~/.grug-brain/brains.json\n");
+  process.stderr.write("grug: fatal — no primary brain directory found. Check ~/.grug-brain/brains.json\n");
   process.exit(1);
 }
 
