@@ -9,6 +9,7 @@ import {
 import { join, resolve, relative, basename, dirname, extname } from "path";
 import { fileURLToPath } from "url";
 import { execFileSync } from "child_process";
+import { hostname as osHostname } from "os";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 
@@ -189,45 +190,61 @@ function today() {
 
 // --- git ---
 
-function git(...args) {
+function getHostname() {
+  const full = osHostname();
+  const first = full.split(".")[0];
+  const sanitized = first.replace(/[^a-zA-Z0-9-]/g, "");
+  return sanitized || "unknown";
+}
+
+const syncLocks = new Map();
+
+function acquireSyncLock(brain) {
+  if (syncLocks.get(brain.name) === true) return false;
+  syncLocks.set(brain.name, true);
+  return true;
+}
+
+function releaseSyncLock(brain) {
+  syncLocks.set(brain.name, false);
+}
+
+function git(brain, ...args) {
   try {
     return execFileSync("git", args, {
-      cwd: MEMORY_DIR, encoding: "utf-8", timeout: 10000,
+      cwd: brain.dir, encoding: "utf-8", timeout: 10000,
       stdio: ["pipe", "pipe", "pipe"],
     }).trim();
   } catch { return null; }
 }
 
-function ensureGitRepo() {
-  // Must be its own repo root, not a subdirectory of a parent repo
-  if (git("rev-parse", "--git-dir") === ".git") return true;
-  if (git("init") === null) return false;
+function ensureGitRepo(brain) {
+  if (git(brain, "rev-parse", "--git-dir") === ".git") return true;
+  if (git(brain, "init") === null) return false;
   const ignore = "*.db\n*.db-wal\n*.db-shm\nrecall.md\nlocal/\n.grugignore\n";
-  writeFileSync(join(MEMORY_DIR, ".gitignore"), ignore, "utf-8");
-  git("add", ".gitignore");
-  git("commit", "-m", "grug: init");
+  writeFileSync(join(brain.dir, ".gitignore"), ignore, "utf-8");
+  git(brain, "add", ".gitignore");
+  git(brain, "commit", "-m", "grug: init");
   return true;
 }
 
-function hasRemote() {
-  const remote = git("remote");
+function hasRemote(brain) {
+  const remote = git(brain, "remote");
   return remote !== null && remote.length > 0;
 }
 
-function loadGrugIgnore() {
-  const content = readFile(join(MEMORY_DIR, ".grugignore"));
+function loadGrugIgnore(brain) {
+  const content = readFile(join(brain.dir, ".grugignore"));
   if (!content) return [];
   return content.split("\n").map(l => l.trim()).filter(l => l && !l.startsWith("#"));
 }
 
-function isLocalMemory(relPath, content) {
-  // frontmatter sync: false
+function isLocalFile(brain, relPath, content) {
   if (content) {
     const fm = extractFrontmatter(content);
     if (fm.sync === "false") return true;
   }
-  // .grugignore patterns
-  for (const pattern of loadGrugIgnore()) {
+  for (const pattern of loadGrugIgnore(brain)) {
     if (pattern.endsWith("/") && relPath.startsWith(pattern)) return true;
     if (pattern.includes("*")) {
       const regex = new RegExp("^" + pattern.replace(/\./g, "\\.").replace(/\*/g, ".*") + "$");
@@ -238,39 +255,140 @@ function isLocalMemory(relPath, content) {
   return false;
 }
 
-function syncGitExclude() {
-  if (!ensureGitRepo()) return;
+function syncGitExclude(brain) {
+  if (!ensureGitRepo(brain)) return;
   const lines = ["# managed by grug-brain", ".grugignore"];
-  lines.push(...loadGrugIgnore());
-  // find sync:false memories in the primary brain
-  for (const { path } of stmts.allFilesForBrain.all(primaryBrain.name)) {
-    const content = readFile(join(MEMORY_DIR, path));
-    if (content && extractFrontmatter(content).sync === "false") lines.push(path);
+  lines.push(...loadGrugIgnore(brain));
+  // Walk brain directory to find sync:false files
+  for (const fullPath of walkFiles(brain.dir)) {
+    const content = readFile(fullPath);
+    if (content && extractFrontmatter(content).sync === "false") {
+      lines.push(relative(brain.dir, fullPath));
+    }
   }
-  ensureDir(join(MEMORY_DIR, ".git", "info"));
-  writeFileSync(join(MEMORY_DIR, ".git", "info", "exclude"), lines.join("\n") + "\n", "utf-8");
+  ensureDir(join(brain.dir, ".git", "info"));
+  writeFileSync(join(brain.dir, ".git", "info", "exclude"), lines.join("\n") + "\n", "utf-8");
 }
 
-function gitCommitMemory(relPath, action) {
-  if (!ensureGitRepo()) return;
+function gitCommitFile(brain, relPath, action) {
+  if (!ensureGitRepo(brain)) return;
+  if (syncLocks.get(brain.name) === true) return;
   if (action !== "delete") {
-    const content = readFile(join(MEMORY_DIR, relPath));
-    if (isLocalMemory(relPath, content)) {
-      syncGitExclude();
+    const content = readFile(join(brain.dir, relPath));
+    if (isLocalFile(brain, relPath, content)) {
+      syncGitExclude(brain);
       return;
     }
   }
-  git("add", "--", relPath);
-  git("commit", "-m", `grug: ${action} ${relPath}`, "--quiet");
+  git(brain, "add", "--", relPath);
+  git(brain, "commit", "-m", `grug: ${action} ${relPath}`, "--quiet");
 }
 
-function gitSync() {
-  if (!ensureGitRepo() || !hasRemote()) return;
-  const before = git("rev-parse", "HEAD");
-  git("pull", "--rebase", "--quiet");
-  const after = git("rev-parse", "HEAD");
-  git("push", "--quiet");
-  if (before !== after) syncBrain(primaryBrain);
+function resolveRebaseConflict(brain) {
+  const unmergedOutput = git(brain, "diff", "--name-only", "--diff-filter=U");
+  if (!unmergedOutput || unmergedOutput.length === 0) {
+    process.stderr.write(`grug: conflict detected in ${brain.name} but no unmerged files found\n`);
+    git(brain, "rebase", "--abort");
+    return;
+  }
+
+  const conflictFiles = unmergedOutput.split("\n").filter(Boolean);
+  const conflictBrain = brains.find(b => b.primary);
+  const host = getHostname();
+  const dateStr = today();
+
+  for (const filePath of conflictFiles) {
+    const localContent = git(brain, "show", `REBASE_HEAD:${filePath}`);
+    if (localContent === null) {
+      process.stderr.write(`grug: could not retrieve local version of ${filePath} in ${brain.name}\n`);
+      continue;
+    }
+
+    let conflictFileName = slugify(brain.name) + "--" + filePath.replace(/\//g, "--");
+    if (!conflictFileName.endsWith(".md")) {
+      conflictFileName = conflictFileName + ".md";
+    }
+    const conflictDir = join(conflictBrain.dir, "conflicts");
+    ensureDir(conflictDir);
+    const conflictFullPath = join(conflictDir, conflictFileName);
+
+    const nameSlug = slugify(basename(filePath, extname(filePath)));
+    const frontmatter = [
+      "---",
+      `name: conflict-${slugify(brain.name)}-${nameSlug}`,
+      `date: ${dateStr}`,
+      "type: memory",
+      "conflict: true",
+      `original_path: ${filePath}`,
+      `original_brain: ${brain.name}`,
+      `hostname: ${host}`,
+      "---",
+    ].join("\n");
+
+    const body = localContent.startsWith("---\n")
+      ? extractBody(localContent)
+      : localContent;
+
+    const fileContent = frontmatter + "\n\n" + body + "\n";
+
+    try {
+      writeFileSync(conflictFullPath, fileContent, "utf-8");
+      process.stderr.write(`grug: conflict saved — ${conflictFullPath}\n`);
+      const relConflictPath = relative(conflictBrain.dir, conflictFullPath);
+      indexFile(conflictBrain.name, relConflictPath, conflictFullPath, "conflicts");
+    } catch (err) {
+      process.stderr.write(`grug: FAILED to save conflict file for ${filePath}: ${err.message}\n`);
+      process.stderr.write(`grug: leaving ${brain.name} in rebase state for manual resolution\n`);
+      return;
+    }
+  }
+
+  git(brain, "rebase", "--abort");
+
+  const remoteBranch = git(brain, "rev-parse", "--abbrev-ref", "@{upstream}");
+  if (remoteBranch !== null) {
+    git(brain, "reset", "--hard", remoteBranch);
+  } else {
+    const mainRef = git(brain, "rev-parse", "--verify", "origin/main");
+    if (mainRef !== null) {
+      git(brain, "reset", "--hard", "origin/main");
+    } else {
+      const masterRef = git(brain, "rev-parse", "--verify", "origin/master");
+      if (masterRef !== null) {
+        git(brain, "reset", "--hard", "origin/master");
+      }
+    }
+  }
+
+  syncBrain(brain);
+}
+
+function gitSync(brain) {
+  if (!ensureGitRepo(brain)) return;
+  if (!hasRemote(brain)) return;
+  if (!acquireSyncLock(brain)) return;
+
+  try {
+    syncGitExclude(brain);
+    const before = git(brain, "rev-parse", "HEAD");
+
+    const pullResult = git(brain, "pull", "--rebase", "--quiet");
+
+    if (pullResult === null) {
+      const rebaseHeadPath = join(brain.dir, ".git", "REBASE_HEAD");
+      if (existsSync(rebaseHeadPath)) {
+        process.stderr.write(`grug: rebase conflict detected in ${brain.name}\n`);
+        resolveRebaseConflict(brain);
+      }
+      return;
+    }
+
+    const after = git(brain, "rev-parse", "HEAD");
+    git(brain, "push", "--quiet");
+    if (before !== after) syncBrain(brain);
+  } finally {
+    releaseSyncLock(brain);
+  }
 }
 
 // --- parsing ---
@@ -513,7 +631,7 @@ for (const brain of brains) {
   process.stderr.write(`grug: brain "${brain.name}" — ${count} files${detail}\n`);
 }
 
-syncGitExclude();
+syncGitExclude(primaryBrain);
 
 // ============================================================
 // SEARCH (both databases, merged by rank)
@@ -586,7 +704,7 @@ server.tool(
     writeFileSync(filePath, fileContent, "utf-8");
     const relPath = relative(MEMORY_DIR, filePath);
     indexFile(primaryBrain.name, relPath, filePath, cat);
-    gitCommitMemory(relPath, exists ? "update" : "write");
+    gitCommitFile(primaryBrain, relPath, exists ? "update" : "write");
 
     return { content: [{ type: "text", text: `${exists ? "updated" : "created"} ${relPath}` }] };
   }
@@ -740,7 +858,7 @@ server.tool(
 
     unlinkSync(filePath);
     removeFile(primaryBrain.name, `${category}/${t}`);
-    gitCommitMemory(`${category}/${t}`, "delete");
+    gitCommitFile(primaryBrain, `${category}/${t}`, "delete");
 
     return { content: [{ type: "text", text: `deleted ${category}/${t}` }] };
   }
@@ -765,14 +883,14 @@ server.tool(
     const ts = new Date().toISOString();
 
     const sections = [];
-    const hasGit = ensureGitRepo();
+    const hasGit = ensureGitRepo(primaryBrain);
 
     // --- commit pending & show history ---
     if (hasGit) {
-      syncGitExclude();
-      git("add", "-A");
-      git("commit", "-m", "grug: dream sync", "--quiet");
-      const log = git("log", "--oneline", "--name-status", "-15", "--", ".");
+      syncGitExclude(primaryBrain);
+      git(primaryBrain, "add", "-A");
+      git(primaryBrain, "commit", "-m", "grug: dream sync", "--quiet");
+      const log = git(primaryBrain, "log", "--oneline", "--name-status", "-15", "--", ".");
       sections.push(log
         ? `## recent history\n\n\`\`\`\n${log}\n\`\`\``
         : "## recent history\n\nno commits yet"
@@ -952,10 +1070,15 @@ if (nonPrimaryBrains.length > 0) {
 const transport = new StdioServerTransport();
 await server.connect(transport);
 
-// --- sync timer ---
+// --- per-brain sync timers ---
 
-const SYNC_INTERVAL = 60_000;
-if (ensureGitRepo() && hasRemote()) {
-  setInterval(gitSync, SYNC_INTERVAL);
-  process.stderr.write("grug: sync enabled (1 min interval)\n");
+for (const brain of brains) {
+  if (!ensureGitRepo(brain)) continue;
+  if (brain.git === null && !hasRemote(brain)) continue;
+
+  let intervalMs = brain.syncInterval * 1000;
+  if (intervalMs < 10000) intervalMs = 10000;
+
+  setInterval(() => gitSync(brain), intervalMs);
+  process.stderr.write(`grug: sync enabled for ${brain.name} (${brain.syncInterval}s interval)\n`);
 }
