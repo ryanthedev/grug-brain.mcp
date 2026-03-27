@@ -141,17 +141,6 @@ if (!primaryBrain) {
   process.exit(1);
 }
 
-// Backwards-compat shims — existing code continues to use these until later phases
-const MEMORY_DIR = primaryBrain.dir;
-
-// DOCS_ENTRIES: collect non-primary, non-flat brains as "multi" entries and flat brains as "named" entries
-// This mirrors the old DOCS_ENTRIES shape so the docs DB section needs no changes in Phase 1
-const DOCS_ENTRIES = brains
-  .filter(b => !b.primary)
-  .map(b => b.flat
-    ? { type: "named", name: b.name, dir: b.dir }
-    : { type: "multi", dir: b.dir }
-  );
 const PAGE_SIZE = 50;
 const BROWSE_PAGE_SIZE = 100;
 const SEARCH_PAGE_SIZE = 20;
@@ -453,7 +442,7 @@ function walkFiles(dir) {
 const SCHEMA_VERSION = 5;
 const grugBrainDir = join(expandHome("~"), ".grug-brain");
 ensureDir(grugBrainDir);
-ensureDir(MEMORY_DIR);
+ensureDir(primaryBrain.dir);
 
 const db = new Database(join(grugBrainDir, "grug.db"));
 db.run("PRAGMA journal_mode = WAL");
@@ -558,15 +547,20 @@ const stmts = {
   countByCategory: db.prepare("SELECT COUNT(*) as total FROM brain_fts WHERE brain = ? AND category = ?"),
 };
 
-// Backwards-compat shims — tools still use these names; Phase 4 will clean up
-const memStmts = stmts;
-const docStmts = stmts;
-
-// Map: brain name -> brain config, for resolving file paths in grug-docs
+// Map: brain name -> brain config, for resolving file paths
 const brainByName = new Map(brains.map(b => [b.name, b]));
 
-// Map category -> brain name (for flat brains, category === brain name)
-// Used by resolveDocPath to find the on-disk base dir
+// Resolve a brain by name, defaulting to primaryBrain.
+// Returns { brain } on success, or { error: string } if not found.
+function resolveBrain(name) {
+  if (!name) return { brain: primaryBrain };
+  const brain = brainByName.get(name);
+  if (!brain) return { error: `unknown brain "${name}"` };
+  return { brain };
+}
+
+// Map category -> brain dir (for flat brains, category === brain name)
+// Used by resolveDocPath to find the on-disk absolute path
 const catBrainDir = new Map();
 
 function indexFile(brainName, relPath, fullPath, category) {
@@ -686,10 +680,15 @@ server.tool(
     category: z.string().describe("Folder to store in, e.g. loopback, feedback, react-native"),
     path: z.string().describe("Filename for the memory, e.g. no-db-mocks"),
     content: z.string().describe("Memory content in markdown"),
+    brain: z.string().optional().describe("Brain to write to (defaults to primary brain)"),
   },
-  async ({ category, path: name, content }) => {
+  async ({ category, path: name, content, brain: brainName }) => {
+    const { brain, error } = resolveBrain(brainName);
+    if (error) return { content: [{ type: "text", text: error }] };
+    if (!brain.writable) return { content: [{ type: "text", text: `brain "${brain.name}" is read-only` }] };
+
     const cat = slugify(category);
-    const catDir = join(MEMORY_DIR, cat);
+    const catDir = join(brain.dir, cat);
     ensureDir(catDir);
 
     const slug = slugify(name);
@@ -702,9 +701,9 @@ server.tool(
     }
 
     writeFileSync(filePath, fileContent, "utf-8");
-    const relPath = relative(MEMORY_DIR, filePath);
-    indexFile(primaryBrain.name, relPath, filePath, cat);
-    gitCommitFile(primaryBrain, relPath, exists ? "update" : "write");
+    const relPath = relative(brain.dir, filePath);
+    indexFile(brain.name, relPath, filePath, cat);
+    gitCommitFile(brain, relPath, exists ? "update" : "write");
 
     return { content: [{ type: "text", text: `${exists ? "updated" : "created"} ${relPath}` }] };
   }
@@ -728,8 +727,7 @@ server.tool(
 
     for (const r of results) {
       const date = r.date ? ` date:${r.date}` : "";
-      const brainLabel = r.brain !== primaryBrain.name ? ` {${r.brain}}` : "";
-      lines.push(`${r.path}${date} [${r.category}]${brainLabel}\n  ${r.snippet || r.description}`);
+      lines.push(`${r.path}${date} [${r.category}] [${r.brain}]\n  ${r.snippet || r.description}`);
     }
 
     const totalPages = Math.ceil(total / SEARCH_PAGE_SIZE);
@@ -745,40 +743,96 @@ server.tool(
 
 server.tool(
   "grug-read",
-  "Read memories. No args = list categories. Category = list files. Category + path = read file.",
+  "Read and browse brains. No args = list all brains. Brain only = list categories. Brain + category = list files. Brain + category + path = read file. Omitting brain searches primary brain first.",
   {
+    brain: z.string().optional().describe("Brain name to browse (omit to list all brains)"),
     category: z.string().optional().describe("Category to browse or read from"),
     path: z.string().optional().describe("Filename within the category to read"),
   },
-  async ({ category, path: name }) => {
-    if (!category && !name) {
-      const rows = stmts.categoryCounts.all(primaryBrain.name);
-      if (rows.length === 0) return { content: [{ type: "text", text: "no categories yet" }] };
-      const lines = rows.map(r => `  ${r.category}  (${r.count} memories)`);
-      return { content: [{ type: "text", text: `${rows.length} categories\n\n${lines.join("\n")}` }] };
+  async ({ brain: brainName, category, path: name }) => {
+    // No args: list all brains with status
+    if (!brainName && !category && !name) {
+      if (brains.length === 0) return { content: [{ type: "text", text: "no brains configured" }] };
+      const lines = brains.map(b => {
+        const { count } = stmts.countForBrain.get(b.name);
+        const flags = [
+          b.primary ? "primary" : null,
+          b.writable ? "writable" : "read-only",
+          b.git ? "git-synced" : null,
+        ].filter(Boolean).join(", ");
+        return `  ${b.name}  (${count} files, ${flags})`;
+      });
+      return { content: [{ type: "text", text: `${brains.length} brains\n\n${lines.join("\n")}` }] };
     }
 
-    if (category && !name) {
-      const rows = stmts.recallByCategory.all(primaryBrain.name, category);
-      if (rows.length === 0) return { content: [{ type: "text", text: `no memories in "${category}"` }] };
+    // Backwards compat: category provided without brain — search primary brain first, then all brains
+    if (!brainName && category && !name) {
+      let targetBrain = primaryBrain;
+      const primaryRows = stmts.recallByCategory.all(primaryBrain.name, category);
+      if (primaryRows.length === 0) {
+        // Fall back to any brain that has this category
+        for (const b of brains) {
+          if (b.primary) continue;
+          const rows = stmts.recallByCategory.all(b.name, category);
+          if (rows.length > 0) { targetBrain = b; break; }
+        }
+      }
+      const rows = stmts.recallByCategory.all(targetBrain.name, category);
+      if (rows.length === 0) return { content: [{ type: "text", text: `no files in "${category}"` }] };
       const lines = rows.map(r => {
         const date = r.date ? ` (${r.date})` : "";
         return `- ${r.name}${date}: ${r.description}`;
       });
-      return { content: [{ type: "text", text: `# ${category} (${rows.length} memories)\n\n${lines.join("\n")}` }] };
+      return { content: [{ type: "text", text: `# ${category} [${targetBrain.name}] (${rows.length} files)\n\n${lines.join("\n")}` }] };
     }
 
+    // Backwards compat: path provided without brain/category — try to read from primary brain
+    if (!brainName && !category && name) {
+      const cat = name.split("/")[0];
+      const file = name.includes("/") ? name.split("/").pop() : name;
+      const t = file.endsWith(".md") ? file : `${file}.md`;
+      const filePath = join(primaryBrain.dir, cat, t);
+      if (!existsSync(filePath)) return { content: [{ type: "text", text: `not found: ${name}` }] };
+      const content = readFile(filePath);
+      if (content === null) return { content: [{ type: "text", text: `could not read: ${name}` }] };
+      return { content: [{ type: "text", text: content }] };
+    }
+
+    const { brain, error } = resolveBrain(brainName);
+    if (error) return { content: [{ type: "text", text: error }] };
+
+    // Brain only: list categories
+    if (!category && !name) {
+      const rows = stmts.categoryCounts.all(brain.name);
+      if (rows.length === 0) return { content: [{ type: "text", text: `no categories in brain "${brain.name}"` }] };
+      const lines = rows.map(r => `  ${r.category}  (${r.count} files)`);
+      return { content: [{ type: "text", text: `${rows.length} categories in "${brain.name}"\n\n${lines.join("\n")}` }] };
+    }
+
+    // Brain + category: list files
+    if (category && !name) {
+      const rows = stmts.recallByCategory.all(brain.name, category);
+      if (rows.length === 0) return { content: [{ type: "text", text: `no files in "${brain.name}/${category}"` }] };
+      const lines = rows.map(r => {
+        const date = r.date ? ` (${r.date})` : "";
+        return `- ${r.name}${date}: ${r.description}`;
+      });
+      return { content: [{ type: "text", text: `# ${category} [${brain.name}] (${rows.length} files)\n\n${lines.join("\n")}` }] };
+    }
+
+    // Brain + category + path: read file
     const cat = category || name.split("/")[0];
     const file = name.includes("/") ? name.split("/").pop() : name;
-    let t = file.endsWith(".md") ? file : `${file}.md`;
-    const filePath = join(MEMORY_DIR, cat, t);
-    if (!existsSync(filePath)) return { content: [{ type: "text", text: `not found: ${cat}/${file}` }] };
+    const t = file.endsWith(".md") ? file : `${file}.md`;
+    // Flat brains: files live directly in brain.dir, not in a category subdir
+    const filePath = brain.flat ? join(brain.dir, t) : join(brain.dir, cat, t);
+    if (!existsSync(filePath)) return { content: [{ type: "text", text: `not found: ${brain.name}/${cat}/${file}` }] };
 
     const content = readFile(filePath);
-    if (content === null) return { content: [{ type: "text", text: `could not read: ${cat}/${file}` }] };
+    if (content === null) return { content: [{ type: "text", text: `could not read: ${brain.name}/${cat}/${file}` }] };
 
     const relPath = `${cat}/${t}`;
-    const linked = stmts.getLinks.all(primaryBrain.name, relPath, primaryBrain.name, relPath);
+    const linked = stmts.getLinks.all(brain.name, relPath, brain.name, relPath);
     let text = content;
     if (linked.length > 0) {
       const linkLines = linked.map(l => {
@@ -798,16 +852,20 @@ server.tool(
 
 server.tool(
   "grug-recall",
-  "Get up to speed. Shows 2 most recent per category, writes full listing to recall.md.",
+  "Get up to speed. Shows 2 most recent per category, writes full listing to recall.md in the target brain's directory.",
   {
     category: z.string().optional().describe("Filter to a specific category"),
+    brain: z.string().optional().describe("Brain to recall from (defaults to primary brain)"),
   },
-  async ({ category }) => {
-    const rows = category
-      ? stmts.recallByCategory.all(primaryBrain.name, category)
-      : stmts.recall.all(primaryBrain.name);
+  async ({ category, brain: brainName }) => {
+    const { brain, error } = resolveBrain(brainName);
+    if (error) return { content: [{ type: "text", text: error }] };
 
-    if (rows.length === 0) return { content: [{ type: "text", text: `no memories found${category ? ` in "${category}"` : ""}` }] };
+    const rows = category
+      ? stmts.recallByCategory.all(brain.name, category)
+      : stmts.recall.all(brain.name);
+
+    if (rows.length === 0) return { content: [{ type: "text", text: `no memories found${category ? ` in "${category}"` : ""} in brain "${brain.name}"` }] };
 
     const groups = new Map();
     for (const r of rows) {
@@ -824,7 +882,7 @@ server.tool(
       }
       fullLines.push("");
     }
-    const outPath = join(MEMORY_DIR, "recall.md");
+    const outPath = join(primaryBrain.dir, "recall.md");
     writeFileSync(outPath, fullLines.join("\n"), "utf-8");
 
     const preview = [];
@@ -849,16 +907,21 @@ server.tool(
   {
     category: z.string().describe("Category the memory is in"),
     path: z.string().describe("Filename to delete"),
+    brain: z.string().optional().describe("Brain to delete from (defaults to primary brain)"),
   },
-  async ({ category, path: name }) => {
+  async ({ category, path: name, brain: brainName }) => {
+    const { brain, error } = resolveBrain(brainName);
+    if (error) return { content: [{ type: "text", text: error }] };
+    if (!brain.writable) return { content: [{ type: "text", text: `brain "${brain.name}" is read-only` }] };
+
     const file = name.includes("/") ? name.split("/").pop() : name;
-    let t = file.endsWith(".md") ? file : `${file}.md`;
-    const filePath = join(MEMORY_DIR, category, t);
+    const t = file.endsWith(".md") ? file : `${file}.md`;
+    const filePath = join(brain.dir, category, t);
     if (!existsSync(filePath)) return { content: [{ type: "text", text: `not found: ${category}/${file}` }] };
 
     unlinkSync(filePath);
-    removeFile(primaryBrain.name, `${category}/${t}`);
-    gitCommitFile(primaryBrain, `${category}/${t}`, "delete");
+    removeFile(brain.name, `${category}/${t}`);
+    gitCommitFile(brain, `${category}/${t}`, "delete");
 
     return { content: [{ type: "text", text: `deleted ${category}/${t}` }] };
   }
@@ -984,26 +1047,25 @@ server.tool(
   }
 );
 
-// --- grug-docs ---
+// --- grug-docs (deprecated alias for grug-read, filters to non-primary brains) ---
 
 // Resolve a relPath (as stored in brain_fts) to an on-disk absolute path.
-// For category brains: relPath is "cat/file", baseDir = catBrainDir[cat].
-// For flat brains: relPath is just the filename; check all flat brain dirs.
+// For category brains: relPath is "cat/file", baseDir is derived from catBrainDir.
+// For flat brains: relPath has no category prefix — check each flat brain's dir.
 function resolveDocPath(relPath) {
-  const parts = relPath.split("/");
-  const firstPart = parts[0];
+  const firstPart = relPath.split("/")[0];
 
-  // Category brain: first path segment is a category name
+  // Category brain: first path segment is a category, catBrainDir maps it to base dir
   const baseDir = catBrainDir.get(firstPart);
   if (baseDir) {
     const full = join(baseDir, relPath);
     if (existsSync(full)) return full;
   }
 
-  // Flat brain: relPath has no category prefix — check each flat brain's dir
-  for (const brain of brains) {
-    if (!brain.flat) continue;
-    const full = join(brain.dir, relPath);
+  // Flat brain: no category prefix — check each flat brain's dir
+  for (const b of brains) {
+    if (!b.flat) continue;
+    const full = join(b.dir, relPath);
     if (existsSync(full)) return full;
   }
 
@@ -1012,22 +1074,20 @@ function resolveDocPath(relPath) {
 
 const nonPrimaryBrains = brains.filter(b => !b.primary);
 
-if (nonPrimaryBrains.length > 0) {
-  const docCatSummary = stmts.allCategoryCounts.all()
-    .filter(r => r.brain !== primaryBrain.name)
-    .map(r => `${r.category} (${r.count})`)
-    .join(", ");
+{
   const docTotal = nonPrimaryBrains.reduce((sum, b) => sum + stmts.countForBrain.get(b.name).count, 0);
 
+  // Deprecated: use grug-read with a brain parameter instead.
   server.tool(
     "grug-docs",
-    `Browse and read documentation. ${docTotal} docs across: ${docCatSummary || "no docs yet"}.`,
+    `[Deprecated: use grug-read] Browse documentation brains. ${docTotal} docs across ${nonPrimaryBrains.length} non-primary brain(s).`,
     {
       category: z.string().optional().describe("Doc category to browse"),
-      path: z.string().optional().describe("File path to read (relative to docs dir)"),
+      path: z.string().optional().describe("File path to read"),
       page: z.number().optional().describe("Page number for long files"),
     },
     async ({ category, path: target, page }) => {
+      // No args: list categories across all non-primary brains
       if (!category && !target) {
         const rows = stmts.allCategoryCounts.all().filter(r => r.brain !== primaryBrain.name);
         if (rows.length === 0) return { content: [{ type: "text", text: "no docs found" }] };
@@ -1035,6 +1095,7 @@ if (nonPrimaryBrains.length > 0) {
         return { content: [{ type: "text", text: `${rows.length} doc categories\n\n${lines.join("\n")}` }] };
       }
 
+      // Path provided: resolve and read file
       if (target) {
         let filePath = resolveDocPath(target);
         if (!filePath) filePath = resolve(target);
@@ -1044,21 +1105,19 @@ if (nonPrimaryBrains.length > 0) {
         return { content: [{ type: "text", text: paginate(content, page) }] };
       }
 
-      // Find which brain(s) have this category
+      // Category only: list files in first matching non-primary brain
       const matchingBrain = nonPrimaryBrains.find(b => {
-        const cats = stmts.categoryCounts.all(b.name).map(r => r.category);
-        return cats.includes(category);
+        return stmts.categoryCounts.all(b.name).some(r => r.category === category);
       });
       if (!matchingBrain) return { content: [{ type: "text", text: `no docs in "${category}"` }] };
 
       const p = Math.max(1, page || 1);
-      const limit = BROWSE_PAGE_SIZE;
-      const offset = (p - 1) * limit;
+      const offset = (p - 1) * BROWSE_PAGE_SIZE;
       const { total } = stmts.countByCategory.get(matchingBrain.name, category);
       if (total === 0) return { content: [{ type: "text", text: `no docs in "${category}"` }] };
-      const rows = stmts.listByCategory.all(matchingBrain.name, category, limit, offset);
+      const rows = stmts.listByCategory.all(matchingBrain.name, category, BROWSE_PAGE_SIZE, offset);
       const lines = rows.map(r => `- [${r.name}](${r.path}): ${r.description || ""}`);
-      const totalPages = Math.ceil(total / limit);
+      const totalPages = Math.ceil(total / BROWSE_PAGE_SIZE);
       const paging = totalPages > 1
         ? `\n--- page ${p}/${totalPages} (${total} docs) | page:${p + 1} for more ---`
         : "";
