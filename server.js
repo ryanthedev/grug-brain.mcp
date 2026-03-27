@@ -11,25 +11,146 @@ import { fileURLToPath } from "url";
 import { execFileSync } from "child_process";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
-const MEMORY_DIR = process.env.MEMORY_DIR || join(
-  process.env.HOME || process.env.USERPROFILE || __dirname,
-  ".grug-brain", "memories"
-);
-// DOCS_DIRS supports two formats:
-//   /path/to/dir           — each subdirectory is a category
-//   name=/path/to/dir      — entire directory is one category named "name"
-const DOCS_ENTRIES = (process.env.DOCS_DIRS || process.env.DOCS_DIR || join(__dirname, "docs"))
-  .split(":")
-  .map(entry => {
-    const eq = entry.indexOf("=");
-    if (eq > 0) {
-      const name = entry.slice(0, eq);
-      const dir = resolve(entry.slice(eq + 1));
-      return { type: "named", name, dir };
+
+// --- brain config ---
+
+function expandHome(p) {
+  const home = process.env.HOME || process.env.USERPROFILE || __dirname;
+  if (p === "~") return home;
+  if (p.startsWith("~/")) return join(home, p.slice(2));
+  return p;
+}
+
+// brains.json schema:
+// [
+//   {
+//     "name": "memories",        -- unique identifier
+//     "dir": "~/.grug-brain/memories",
+//     "primary": true,           -- exactly one brain must be primary
+//     "writable": true,          -- defaults: true for normal brains, false for flat:true brains
+//     "flat": false,             -- flat:true means dir contains files directly (no category subdirs)
+//     "git": null,               -- remote URL or null
+//     "syncInterval": 60         -- sync interval in seconds (default 60)
+//   }
+// ]
+function loadBrains() {
+  const home = process.env.HOME || process.env.USERPROFILE || __dirname;
+  const defaultConfigPath = join(home, ".grug-brain", "brains.json");
+  const configPath = process.env.GRUG_CONFIG || defaultConfigPath;
+
+  if (existsSync(configPath)) {
+    let raw;
+    try {
+      raw = JSON.parse(readFileSync(configPath, "utf-8"));
+    } catch (err) {
+      throw new Error(`grug: failed to parse ${configPath}: ${err.message}`);
     }
-    return { type: "multi", dir: resolve(entry) };
-  })
-  .filter(e => existsSync(e.dir));
+
+    if (!Array.isArray(raw)) {
+      throw new Error(`grug: ${configPath} must be a JSON array`);
+    }
+
+    const brains = raw.map((entry, i) => {
+      if (!entry.name || typeof entry.name !== "string") {
+        throw new Error(`grug: brain[${i}] missing required "name" field`);
+      }
+      if (!entry.dir || typeof entry.dir !== "string") {
+        throw new Error(`grug: brain "${entry.name}" missing required "dir" field`);
+      }
+      const flat = entry.flat === true;
+      const writableDefault = flat ? false : true;
+      return {
+        name: entry.name,
+        dir: resolve(expandHome(entry.dir)),
+        primary: entry.primary === true,
+        writable: entry.writable !== undefined ? entry.writable === true : writableDefault,
+        flat,
+        git: entry.git || null,
+        syncInterval: typeof entry.syncInterval === "number" ? entry.syncInterval : 60,
+      };
+    });
+
+    // Validate: unique names
+    const names = new Set();
+    for (const brain of brains) {
+      if (names.has(brain.name)) {
+        throw new Error(`grug: duplicate brain name "${brain.name}" in ${configPath}`);
+      }
+      names.add(brain.name);
+    }
+
+    // Validate: exactly one primary
+    const primaries = brains.filter(b => b.primary);
+    if (primaries.length === 0) {
+      throw new Error(`grug: no brain marked "primary: true" in ${configPath}`);
+    }
+    if (primaries.length > 1) {
+      throw new Error(`grug: multiple brains marked "primary: true" in ${configPath}: ${primaries.map(b => b.name).join(", ")}`);
+    }
+
+    // Filter out brains whose dirs don't exist
+    return brains.filter(b => existsSync(b.dir));
+  }
+
+  // No config file — build from env vars (backwards compat for existing users)
+  const brains = [];
+
+  // Primary brain from MEMORY_DIR
+  const memoryDir = resolve(expandHome(
+    process.env.MEMORY_DIR || join(home, ".grug-brain", "memories")
+  ));
+  brains.push({
+    name: "memories",
+    dir: memoryDir,
+    primary: true,
+    writable: true,
+    flat: false,
+    git: null,
+    syncInterval: 60,
+  });
+
+  // Doc brains from DOCS_DIRS / DOCS_DIR
+  // Supports two formats:
+  //   /path/to/dir           — each subdirectory is a category (multi brain)
+  //   name=/path/to/dir      — entire directory is one category named "name" (flat brain)
+  const docsRaw = process.env.DOCS_DIRS || process.env.DOCS_DIR || "";
+  if (docsRaw) {
+    for (const entry of docsRaw.split(":")) {
+      const eq = entry.indexOf("=");
+      if (eq > 0) {
+        const name = entry.slice(0, eq);
+        const dir = resolve(expandHome(entry.slice(eq + 1)));
+        brains.push({ name, dir, primary: false, writable: false, flat: true, git: null, syncInterval: 60 });
+      } else {
+        const dir = resolve(expandHome(entry));
+        const name = basename(dir);
+        brains.push({ name, dir, primary: false, writable: false, flat: false, git: null, syncInterval: 60 });
+      }
+    }
+  }
+
+  return brains.filter(b => existsSync(b.dir));
+}
+
+const brains = loadBrains();
+const primaryBrain = brains.find(b => b.primary);
+
+if (!primaryBrain) {
+  process.stderr.write("grug: fatal — no primary brain directory found. Check MEMORY_DIR or ~/.grug-brain/brains.json\n");
+  process.exit(1);
+}
+
+// Backwards-compat shims — existing code continues to use these until later phases
+const MEMORY_DIR = primaryBrain.dir;
+
+// DOCS_ENTRIES: collect non-primary, non-flat brains as "multi" entries and flat brains as "named" entries
+// This mirrors the old DOCS_ENTRIES shape so the docs DB section needs no changes in Phase 1
+const DOCS_ENTRIES = brains
+  .filter(b => !b.primary)
+  .map(b => b.flat
+    ? { type: "named", name: b.name, dir: b.dir }
+    : { type: "multi", dir: b.dir }
+  );
 const PAGE_SIZE = 50;
 const BROWSE_PAGE_SIZE = 100;
 const SEARCH_PAGE_SIZE = 20;
