@@ -1,9 +1,9 @@
 # Plan: Unified Brain System
 
 **Created:** 2026-03-26
-**Status:** in-progress
+**Status:** complete
 **Started:** 2026-03-26 11:30
-**Current Phase:** 1
+**Completed:** 2026-03-26
 **Complexity:** complex
 
 ---
@@ -274,4 +274,37 @@ Refactor server.js in place, phase by phase. Each phase produces a working serve
 
 ## Execution Log
 
-_To be filled during /code-foundations:building_
+### Phase 1: Config Loading
+- [x] PRE-GATE: SKIPPED — simplified pipeline
+- [x] IMPLEMENT: loadBrains() with brains.json + env var fallback, 37 test assertions
+- [x] POST-GATE: PASS
+- [x] CHECKPOINT: Committed
+Pipeline: simplified | Model: sonnet | Commit: fce7a0a
+
+### Phase 2: Unified Database
+- [x] PRE-GATE: SKIPPED — simplified pipeline
+- [x] IMPLEMENT: Single DB at ~/.grug-brain/grug.db, unified brain_fts, syncBrain()
+- [x] POST-GATE: PASS
+- [x] CHECKPOINT: Committed
+Pipeline: simplified | Model: sonnet | Commit: 6c5889d
+
+### Phase 3: Per-Brain Git with Conflict Resolution
+- [x] PRE-GATE: Discovery + pseudocode complete
+- [x] IMPLEMENT: Per-brain git helpers, resolveRebaseConflict, sync locks, per-brain timers
+- [x] POST-GATE: PASS
+- [x] CHECKPOINT: Committed
+Pipeline: full | Model: opus | Commit: 1abca9e
+
+### Phase 4: Unified Tools
+- [x] PRE-GATE: SKIPPED — simplified pipeline
+- [x] IMPLEMENT: Brain param on all tools, grug-read as unified browser, shims removed
+- [x] POST-GATE: PASS (attempt 2 — fixed flat brain reads, recall.md location, grug-docs registration)
+- [x] CHECKPOINT: Committed
+Pipeline: simplified | Model: sonnet | Commit: 99d875c
+
+### Phase 5: Dream, Commands, Documentation
+- [x] PRE-GATE: SKIPPED — simplified pipeline
+- [x] IMPLEMENT: Multi-brain dream, conflict surfacing, setup/ingest commands, README, v3.0.0
+- [x] POST-GATE: PASS
+- [x] CHECKPOINT: Committed
+Pipeline: simplified | Model: sonnet | Commit: a70e021
