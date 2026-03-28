@@ -1,6 +1,6 @@
 # grug-brain
 
-Persistent memory for LLMs that works across projects. Stores memories as markdown files, indexes them in SQLite FTS5 for ranked search. Supports any number of knowledge sources ("brains") — memory stores, doc libraries, notes directories — all unified in one searchable index. Git-tracked history with a dreaming feature for memory maintenance.
+Persistent memory for LLMs. Any number of knowledge sources ("brains") unified in one searchable index. Git-synced across machines. Conflict resolution built in.
 
 ## Install
 
@@ -9,121 +9,140 @@ claude plugin add grug-brain
 /setup
 ```
 
-`/setup` handles everything: installs dependencies, registers the MCP server, verifies health, and walks you through creating `~/.grug-brain/brains.json`.
-
-## Tools
-
-| Tool | What it does |
-|------|-------------|
-| `grug-write` | Store a memory (category + path + markdown content) |
-| `grug-search` | BM25-ranked full-text search across all brains |
-| `grug-read` | Browse brains, list categories, list memories, read files |
-| `grug-recall` | Get up to speed — preview + full listing to recall.md |
-| `grug-delete` | Remove a memory |
-| `grug-dream` | Review memory health across all brains: git history, cross-links, conflicts, stale detection |
-
 ## Brains
 
-grug-brain treats every knowledge source as a "brain" — a directory of markdown files. All brains share one FTS5 index, so `grug-search` spans everything.
-
-Configure brains in `~/.grug-brain/brains.json`:
+Everything is a brain. A brain is a directory of markdown files that grug indexes and searches. You decide how to split them up.
 
 ```json
 [
   {
-    "name": "memories",
-    "dir": "~/.grug-brain/memories",
-    "primary": true,
+    "name": "self",
+    "dir": "~/.grug-brain/self",
     "writable": true,
-    "git": "git@github.com:you/memories.git",
+    "primary": true
+  },
+  {
+    "name": "hive",
+    "dir": "~/.grug-brain/memories",
+    "git": "git@github.com:ryanthedev/grug-memories.git",
+    "writable": true,
     "syncInterval": 60
   },
   {
-    "name": "grug-docs",
-    "dir": "/repos/grug-docs",
-    "primary": false,
-    "writable": false,
-    "flat": false,
-    "git": null
+    "name": "research",
+    "dir": "~/repos/grug-docs",
+    "git": "git@github.com:ryanthedev/grug-docs.git",
+    "writable": true,
+    "syncInterval": 300
   },
   {
     "name": "drizzle",
-    "dir": "/repos/drizzle-docs/content",
-    "primary": false,
-    "writable": false,
-    "flat": true,
-    "git": null
+    "dir": "~/repos/drizzle-orm-docs/src/content/docs",
+    "flat": true
   }
 ]
 ```
 
-### Brain fields
+Config lives at `~/.grug-brain/brains.json`. Auto-created on first run.
 
 | Field | Required | Default | Description |
 |-------|----------|---------|-------------|
-| `name` | yes | — | Unique identifier used in tool calls |
-| `dir` | yes | — | Directory path. Supports `~` expansion. |
-| `primary` | yes | — | Exactly one brain must be `true`. Receives conflict files and recall.md. |
-| `writable` | no | `true` (or `false` if flat) | Whether `grug-write` and `grug-delete` work here |
-| `flat` | no | `false` | `true` = files directly in dir with no category subdirectories |
-| `git` | no | `null` | Git remote URL for sync. `null` = local only. |
-| `syncInterval` | no | `60` | How often to sync with git remote, in seconds |
+| `name` | yes | | Unique identifier |
+| `dir` | yes | | Directory path. Supports `~`. |
+| `primary` | no | `false` | Default target for writes. Exactly one brain should be primary. |
+| `writable` | no | `true` (`false` if flat) | Whether grug-write and grug-delete work here |
+| `flat` | no | `false` | Files directly in dir, no category subdirectories |
+| `git` | no | `null` | Git remote URL for sync |
+| `syncInterval` | no | `60` | Seconds between git sync |
+| `source` | no | `null` | Origin URL for /ingest refresh |
+| `refreshInterval` | no | `null` | Seconds between doc refresh (read-only brains only, minimum 3600) |
 
-### Brain types
+## Tools
 
-**Memory brain** (`writable: true`, `flat: false`): The primary store for memories. Each subdirectory is a category. The primary brain also receives conflict files from git merges.
-
-**Docs brain** (`writable: false`, `flat: false`): Read-only reference documentation. Each subdirectory is a category. Add via `/ingest`.
-
-**Flat brain** (`flat: true`): Files live directly in the directory, no category subdirectories. The brain name becomes the category. Read-only by default.
-
-### First run
-
-If `~/.grug-brain/brains.json` doesn't exist, grug-brain creates a default config with a single primary brain at `~/.grug-brain/memories/`. Run `/setup` to add more brains.
-
-## Dreaming
-
-`/dream` reviews your memory store and takes maintenance actions across all brains:
-
-- **Git history**: Commits pending changes per writable brain, shows recent changelog
-- **Conflicts**: Lists entries in the `conflicts/` category with resolution guidance
-- **Cross-links**: Finds related memories across different categories and brains
-- **Stale detection**: Flags memories older than 90 days for review
-- **Quality issues**: Catches missing dates or descriptions
-
-Run once manually, or set up periodic maintenance:
+**grug-write** stores a memory. Defaults to the primary brain.
 
 ```
+grug-write category:"feedback" path:"no-mocks" content:"don't mock the database"
+grug-write brain:"hive" category:"feedback" path:"no-mocks" content:"..."
+```
+
+**grug-search** searches all brains at once. Results tagged with the source brain.
+
+```
+grug-search query:"sqlite"
+> [hive] loopback/powersync-patch-vs-upsert.md
+> [research] bun/runtime-sqlite.mdx
+> [drizzle] connect-bun-sqlite.mdx
+```
+
+**grug-read** browses brains.
+
+```
+grug-read                                    # list all brains
+grug-read brain:"research"                   # list categories in research
+grug-read brain:"research" category:"bun"    # list files
+grug-read brain:"hive" category:"feedback" path:"no-mocks"  # read file
+```
+
+**grug-recall** gets you up to speed on a brain.
+
+```
+grug-recall                    # primary brain
+grug-recall brain:"hive"       # specific brain
+```
+
+**grug-delete** removes a memory. Only works on writable brains.
+
+```
+grug-delete brain:"self" category:"scratch" path:"old-note"
+```
+
+**grug-config** manages brains at runtime. No restart needed.
+
+```
+grug-config action:"list"
+grug-config action:"add" name:"tailwind" dir:"~/.grug-brain/tailwind" flat:true
+grug-config action:"remove" name:"tailwind"
+```
+
+**grug-dream** runs maintenance across all writable brains. Commits pending changes, surfaces conflicts, finds cross-links, flags stale memories.
+
+```
+/dream
 /loop 30m /dream
 ```
 
-### Conflict resolution
+## Conflict Resolution
 
-When a git rebase fails during sync, grug-brain saves your local version to the `conflicts/` category in the primary brain. Each conflict entry includes the original path, source brain, hostname, and date. The dream report lists all conflicts with step-by-step resolution guidance:
+When two machines edit the same file between syncs, grug saves your local version to the `conflicts/` category in the primary brain. Each conflict has frontmatter with the original path, brain, hostname, and date.
 
-1. Read the conflict file with `grug-read`
-2. Write the correct version to the original path with `grug-write`
-3. Delete the conflict entry with `grug-delete`
+Dream surfaces conflicts. To resolve:
 
-## Search
+1. Read the conflict file
+2. Write the correct version to the original path
+3. Delete the conflict entry
 
-SQLite FTS5 with porter stemming and BM25 ranking. `run` finds `running`. `power` finds `powersync`. Multi-word queries match any term and rank by relevance. 20 results per page with highlighted snippets. Results show which brain each file came from.
+## Adding Third-Party Docs
 
-The index syncs incrementally on startup — only files whose mtime changed get re-indexed.
+```
+/ingest github:sveltejs/kit/documentation/docs
+```
 
-## File layout
+This clones the repo, copies markdown to `~/.grug-brain/<name>/`, and adds a brain entry. Set `refreshInterval` on the brain to keep it current.
+
+## File Layout
 
 ```
 ~/.grug-brain/
-  brains.json             # brain configuration
-  grug.db                 # unified FTS5 index (auto-managed)
-  memories/               # primary brain (default)
-    api-server/
-      no-db-mocks.md
+  brains.json
+  grug.db
+  self/
+    scratch/
+      i-am-alive.md
+  memories/
     feedback/
-      no-summaries.md
-    conflicts/            # git conflict files (auto-managed)
-      memories--api-server--no-db-mocks.md
+    loopback/
+    conflicts/
 ```
 
 ## License
