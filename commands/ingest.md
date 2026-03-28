@@ -27,7 +27,7 @@ Short, lowercase, hyphens only (e.g., `react-native`, `agentic-planning`).
 - If ingesting a subfolder: use the first path segment as the name (e.g., `agentic-planning` from `agentic-planning/extractions`).
 - Ask the user to confirm.
 
-The target directory is where docs will live on disk. Default: `${CLAUDE_PLUGIN_ROOT}/docs/<brain-name>/`. Ask the user if they prefer a different location.
+The target directory is where docs will live on disk. Default: `~/.grug-brain/<brain-name>/`. Ask the user if they prefer a different location.
 
 ## 3. Check for existing brain entry
 
@@ -37,7 +37,7 @@ Check if a brain with this name already exists in `~/.grug-brain/brains.json`:
 cat ~/.grug-brain/brains.json 2>/dev/null
 ```
 
-If a brain with this name already exists, ask: update (overwrite files), or cancel?
+If a brain with this name already exists and has a `source` field, offer to re-ingest from the stored source without asking for the source again. If the user confirms, skip step 1 and use the stored source. If no source is stored, ask: update (provide source again), or cancel?
 
 ## 4. Get the files
 
@@ -86,7 +86,7 @@ Read the current config:
 cat ~/.grug-brain/brains.json 2>/dev/null || echo '[]'
 ```
 
-Add the new entry. Ingested docs brains are read-only and non-primary:
+Add the new entry. Ingested docs brains are read-only and non-primary. Include the `source` field using the original source argument so re-ingestion can use it without re-asking:
 
 ```json
 {
@@ -95,7 +95,8 @@ Add the new entry. Ingested docs brains are read-only and non-primary:
   "primary": false,
   "writable": false,
   "flat": false,
-  "git": null
+  "git": null,
+  "source": "<original source argument, e.g. github:owner/repo/path or local absolute path>"
 }
 ```
 

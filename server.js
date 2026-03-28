@@ -96,23 +96,93 @@ function loadBrains() {
   // No config file — create a default one
   const defaultDir = join(home, ".grug-brain", "memories");
   ensureDir(defaultDir);
-  const defaultConfig = {
-    brains: [
-      { name: "memories", dir: defaultDir, primary: true, writable: true }
-    ]
-  };
+  // Write a JSON array (not an object) — the parser above expects an array
+  const defaultConfig = [
+    { name: "memories", dir: defaultDir, primary: true, writable: true }
+  ];
   ensureDir(dirname(configPath));
   writeFileSync(configPath, JSON.stringify(defaultConfig, null, 2) + "\n", "utf-8");
   process.stderr.write(`grug: created default config at ${configPath}\n`);
   return [{ name: "memories", dir: defaultDir, primary: true, writable: true, flat: false, git: null, syncInterval: 60 }];
 }
 
-const brains = loadBrains();
-const primaryBrain = brains.find(b => b.primary);
+// --- lazy config reload ---
+
+// Cached state for lazy reload (mtime-based: only re-parses when file changes)
+let brains = loadBrains();
+let primaryBrain = brains.find(b => b.primary);
 
 if (!primaryBrain) {
   process.stderr.write("grug: fatal — no primary brain directory found. Check ~/.grug-brain/brains.json\n");
   process.exit(1);
+}
+
+// Last-seen mtime of brains.json. Used by reloadBrains() to skip re-parsing unchanged files.
+let brainsJsonMtime = 0;
+{
+  const home = process.env.HOME || process.env.USERPROFILE || __dirname;
+  const configPath = process.env.GRUG_CONFIG || join(home, ".grug-brain", "brains.json");
+  try { brainsJsonMtime = statSync(configPath).mtimeMs; } catch { /* file may not exist yet */ }
+}
+
+// Re-reads brains.json when mtime changes. Updates module-level brains and primaryBrain.
+// Failures are logged to stderr but never thrown — stale config is better than a crash.
+function reloadBrains() {
+  const home = process.env.HOME || process.env.USERPROFILE || __dirname;
+  const configPath = process.env.GRUG_CONFIG || join(home, ".grug-brain", "brains.json");
+  let currentMtime;
+  try {
+    currentMtime = statSync(configPath).mtimeMs;
+  } catch {
+    return; // Config file gone; keep current brains in memory
+  }
+  if (currentMtime === brainsJsonMtime) return; // File unchanged — skip re-parse
+
+  let newBrains;
+  try {
+    newBrains = loadBrains();
+  } catch (err) {
+    process.stderr.write(`grug: config reload failed — ${err.message}\n`);
+    return; // Keep current brains on parse error
+  }
+
+  const newPrimary = newBrains.find(b => b.primary);
+  if (!newPrimary) {
+    process.stderr.write("grug: config reload skipped — no primary brain in updated config\n");
+    return;
+  }
+
+  // Start timers for newly added brains (brains not in the current set)
+  const currentNames = new Set(brains.map(b => b.name));
+  for (const brain of newBrains) {
+    if (!currentNames.has(brain.name)) {
+      syncBrain(brain);
+      startBrainTimers(brain);
+    }
+  }
+
+  // Stop timers for removed brains
+  const newNames = new Set(newBrains.map(b => b.name));
+  for (const brain of brains) {
+    if (!newNames.has(brain.name)) {
+      stopBrainTimers(brain.name);
+      // Remove from FTS
+      const indexed = stmts.allFilesForBrain.all(brain.name).map(r => r.path);
+      for (const relPath of indexed) removeFile(brain.name, relPath);
+    }
+  }
+
+  brains = newBrains;
+  primaryBrain = newPrimary;
+  brainsJsonMtime = currentMtime;
+  process.stderr.write(`grug: config reloaded — ${brains.length} brain(s)\n`);
+}
+
+// Returns current brains array after checking for config changes.
+// Call this at the start of every tool handler.
+function getBrains() {
+  reloadBrains();
+  return brains;
 }
 
 const PAGE_SIZE = 50;
@@ -589,6 +659,78 @@ function syncBrain(brain) {
   }
 }
 
+// --- timer lifecycle ---
+
+// Maps keyed by brain name to track active interval IDs.
+// Sync timers: periodic git pull+push for writable brains with git remotes.
+// Refresh timers: periodic git pull for read-only brains with source + refreshInterval.
+const syncTimers = new Map();
+const refreshTimers = new Map();
+
+// Minimum allowed refresh interval (1 hour). Prevents runaway refresh storms.
+const MIN_REFRESH_INTERVAL_S = 3600;
+
+// Pulls latest content for a read-only brain from its git source, then reindexes.
+// Only runs for non-writable brains with a source field and a configured refreshInterval.
+// Failures are logged to stderr and never thrown — the server stays running.
+function refreshBrain(brain) {
+  if (brain.writable) return; // Sync (not refresh) handles writable brains
+  if (!brain.source) return;  // No source to pull from
+
+  try {
+    // git pull --ff-only: safe for read-only clones; fails cleanly if upstream rebased
+    const result = git(brain, "pull", "--ff-only", "--quiet");
+    if (result === null) {
+      process.stderr.write(`grug: refresh skipped for ${brain.name} (ff-only failed — upstream may have rebased)\n`);
+      return;
+    }
+    syncBrain(brain);
+    process.stderr.write(`grug: refreshed ${brain.name}\n`);
+  } catch (err) {
+    process.stderr.write(`grug: refresh failed for ${brain.name}: ${err.message}\n`);
+  }
+}
+
+// Starts sync and/or refresh timers for a single brain.
+// Idempotent: if timers already exist for this brain, they are replaced.
+function startBrainTimers(brain) {
+  stopBrainTimers(brain.name); // Clear any existing timers first
+
+  if (brain.git !== null || hasRemote(brain)) {
+    if (!ensureGitRepo(brain)) return;
+    let syncIntervalMs = brain.syncInterval * 1000;
+    if (syncIntervalMs < 10000) syncIntervalMs = 10000; // Minimum 10s to prevent hammering git
+    const timerId = setInterval(() => gitSync(brain), syncIntervalMs);
+    syncTimers.set(brain.name, timerId);
+    process.stderr.write(`grug: sync enabled for ${brain.name} (${brain.syncInterval}s interval)\n`);
+  }
+
+  if (!brain.writable && brain.source && typeof brain.refreshInterval === "number") {
+    let refreshIntervalS = brain.refreshInterval;
+    if (refreshIntervalS < MIN_REFRESH_INTERVAL_S) {
+      process.stderr.write(`grug: refresh interval for ${brain.name} clamped to ${MIN_REFRESH_INTERVAL_S}s (was ${refreshIntervalS}s)\n`);
+      refreshIntervalS = MIN_REFRESH_INTERVAL_S;
+    }
+    const timerId = setInterval(() => refreshBrain(brain), refreshIntervalS * 1000);
+    refreshTimers.set(brain.name, timerId);
+    process.stderr.write(`grug: refresh enabled for ${brain.name} (${refreshIntervalS}s interval)\n`);
+  }
+}
+
+// Stops and removes all timers for a brain. Safe to call on unknown brain names.
+function stopBrainTimers(brainName) {
+  const syncId = syncTimers.get(brainName);
+  if (syncId !== undefined) {
+    clearInterval(syncId);
+    syncTimers.delete(brainName);
+  }
+  const refreshId = refreshTimers.get(brainName);
+  if (refreshId !== undefined) {
+    clearInterval(refreshId);
+    refreshTimers.delete(brainName);
+  }
+}
+
 for (const brain of brains) syncBrain(brain);
 
 // Startup log: show all brains and their file counts
@@ -657,6 +799,7 @@ server.tool(
     brain: z.string().optional().describe("Brain to write to (defaults to primary brain)"),
   },
   async ({ category, path: name, content, brain: brainName }) => {
+    getBrains(); // Lazy reload before accessing brains
     const { brain, error } = resolveBrain(brainName);
     if (error) return { content: [{ type: "text", text: error }] };
     if (!brain.writable) return { content: [{ type: "text", text: `brain "${brain.name}" is read-only` }] };
@@ -693,6 +836,7 @@ server.tool(
     page: z.number().optional().describe("Page number (20 results per page)"),
   },
   async ({ query, page }) => {
+    getBrains(); // Lazy reload before accessing brains
     const { results, total } = searchAll(query, page);
     if (total === 0) return { content: [{ type: "text", text: `no matches for "${query}"` }] };
 
@@ -724,10 +868,11 @@ server.tool(
     path: z.string().optional().describe("Filename within the category to read"),
   },
   async ({ brain: brainName, category, path: name }) => {
+    const currentBrains = getBrains(); // Lazy reload before accessing brains
     // No args: list all brains with status
     if (!brainName && !category && !name) {
-      if (brains.length === 0) return { content: [{ type: "text", text: "no brains configured" }] };
-      const lines = brains.map(b => {
+      if (currentBrains.length === 0) return { content: [{ type: "text", text: "no brains configured" }] };
+      const lines = currentBrains.map(b => {
         const { count } = stmts.countForBrain.get(b.name);
         const flags = [
           b.primary ? "primary" : null,
@@ -736,7 +881,7 @@ server.tool(
         ].filter(Boolean).join(", ");
         return `  ${b.name}  (${count} files, ${flags})`;
       });
-      return { content: [{ type: "text", text: `${brains.length} brains\n\n${lines.join("\n")}` }] };
+      return { content: [{ type: "text", text: `${currentBrains.length} brains\n\n${lines.join("\n")}` }] };
     }
 
     // Backwards compat: category provided without brain — search primary brain first, then all brains
@@ -832,6 +977,7 @@ server.tool(
     brain: z.string().optional().describe("Brain to recall from (defaults to primary brain)"),
   },
   async ({ category, brain: brainName }) => {
+    getBrains(); // Lazy reload before accessing brains
     const { brain, error } = resolveBrain(brainName);
     if (error) return { content: [{ type: "text", text: error }] };
 
@@ -884,6 +1030,7 @@ server.tool(
     brain: z.string().optional().describe("Brain to delete from (defaults to primary brain)"),
   },
   async ({ category, path: name, brain: brainName }) => {
+    getBrains(); // Lazy reload before accessing brains
     const { brain, error } = resolveBrain(brainName);
     if (error) return { content: [{ type: "text", text: error }] };
     if (!brain.writable) return { content: [{ type: "text", text: `brain "${brain.name}" is read-only` }] };
@@ -898,6 +1045,170 @@ server.tool(
     gitCommitFile(brain, `${category}/${t}`, "delete");
 
     return { content: [{ type: "text", text: `deleted ${category}/${t}` }] };
+  }
+);
+
+// --- grug-config ---
+
+// Reads brains.json for config mutations. Returns the parsed array or throws.
+function readBrainsJson() {
+  const home = process.env.HOME || process.env.USERPROFILE || __dirname;
+  const configPath = process.env.GRUG_CONFIG || join(home, ".grug-brain", "brains.json");
+  if (!existsSync(configPath)) return [];
+  let raw;
+  try {
+    raw = JSON.parse(readFileSync(configPath, "utf-8"));
+  } catch (err) {
+    throw new Error(`failed to parse ${configPath}: ${err.message}`);
+  }
+  if (!Array.isArray(raw)) throw new Error(`${configPath} must be a JSON array`);
+  return raw;
+}
+
+// Writes brains array back to brains.json.
+function writeBrainsJson(brainsArray) {
+  const home = process.env.HOME || process.env.USERPROFILE || __dirname;
+  const configPath = process.env.GRUG_CONFIG || join(home, ".grug-brain", "brains.json");
+  ensureDir(dirname(configPath));
+  writeFileSync(configPath, JSON.stringify(brainsArray, null, 2) + "\n", "utf-8");
+}
+
+server.tool(
+  "grug-config",
+  "Manage brain configuration. list: show all brains. add: create a new brain entry. remove: delete a brain entry (cannot remove the primary brain).",
+  {
+    action: z.enum(["list", "add", "remove"]).describe("Config action to perform"),
+    name: z.string().optional().describe("Brain name (required for add/remove)"),
+    dir: z.string().optional().describe("Brain directory (required for add)"),
+    primary: z.boolean().optional().describe("Mark as primary brain (add only, default false)"),
+    writable: z.boolean().optional().describe("Mark as writable (add only, default true)"),
+    flat: z.boolean().optional().describe("Flat layout — files directly in dir, no category subdirs (add only, default false)"),
+    git: z.string().optional().describe("Git remote URL (add only, optional)"),
+    syncInterval: z.number().optional().describe("Sync interval in seconds (add only, default 60)"),
+    source: z.string().optional().describe("Source identifier for doc refresh, e.g. github:owner/repo/path (add only)"),
+    refreshInterval: z.number().optional().describe("Auto-refresh interval in seconds for read-only brains (add only, minimum 3600)"),
+  },
+  async ({ action, name, dir, primary, writable, flat, git: gitRemote, syncInterval, source, refreshInterval }) => {
+    getBrains(); // Trigger lazy reload before reading config
+
+    if (action === "list") {
+      const currentBrains = getBrains();
+      if (currentBrains.length === 0) return { content: [{ type: "text", text: "no brains configured" }] };
+      const lines = currentBrains.map(b => {
+        const { count } = stmts.countForBrain.get(b.name);
+        const flags = [
+          b.primary ? "primary" : null,
+          b.writable ? "writable" : "read-only",
+          b.git ? `git:${b.git}` : null,
+          (!b.writable && b.source && typeof b.refreshInterval === "number") ? `refresh:${b.refreshInterval}s` : null,
+          syncTimers.has(b.name) ? "sync-active" : null,
+          refreshTimers.has(b.name) ? "refresh-active" : null,
+        ].filter(Boolean).join(", ");
+        return `  ${b.name}  (${count} files, ${flags})`;
+      });
+      return { content: [{ type: "text", text: `${currentBrains.length} brains\n\n${lines.join("\n")}` }] };
+    }
+
+    if (action === "add") {
+      if (!name) return { content: [{ type: "text", text: "add requires: name" }] };
+      if (!dir) return { content: [{ type: "text", text: "add requires: dir" }] };
+
+      // Validate name format (lowercase, hyphens, letters, digits only)
+      if (!/^[a-z0-9][a-z0-9-]*$/.test(name)) {
+        return { content: [{ type: "text", text: `invalid brain name "${name}": use lowercase letters, digits, and hyphens only` }] };
+      }
+
+      let existing;
+      try {
+        existing = readBrainsJson();
+      } catch (err) {
+        return { content: [{ type: "text", text: `cannot read config: ${err.message}` }] };
+      }
+
+      // Reject duplicate names
+      if (existing.some(b => b.name === name)) {
+        return { content: [{ type: "text", text: `brain "${name}" already exists` }] };
+      }
+
+      // Reject multiple primaries
+      if (primary && existing.some(b => b.primary)) {
+        return { content: [{ type: "text", text: `a primary brain already exists — set primary: false or remove the existing primary first` }] };
+      }
+
+      const resolvedDir = resolve(expandHome(dir));
+      ensureDir(resolvedDir);
+
+      const isFlat = flat === true;
+      const isWritable = writable !== undefined ? writable === true : !isFlat;
+
+      const entry = {
+        name,
+        dir: resolvedDir,
+        primary: primary === true,
+        writable: isWritable,
+        flat: isFlat,
+        git: gitRemote || null,
+        syncInterval: typeof syncInterval === "number" ? syncInterval : 60,
+      };
+      if (source) entry.source = source;
+      if (typeof refreshInterval === "number") entry.refreshInterval = refreshInterval;
+
+      existing.push(entry);
+      try {
+        writeBrainsJson(existing);
+      } catch (err) {
+        return { content: [{ type: "text", text: `failed to write config: ${err.message}` }] };
+      }
+
+      // Force a reload so the new brain is live immediately
+      brainsJsonMtime = 0;
+      reloadBrains();
+
+      // Start timers for the new brain (reloadBrains already called startBrainTimers)
+      const newBrain = getBrains().find(b => b.name === name);
+      if (!newBrain) {
+        return { content: [{ type: "text", text: `added brain "${name}" to config but dir may not exist yet` }] };
+      }
+      return { content: [{ type: "text", text: `added brain "${name}" — dir: ${resolvedDir}` }] };
+    }
+
+    if (action === "remove") {
+      if (!name) return { content: [{ type: "text", text: "remove requires: name" }] };
+
+      let existing;
+      try {
+        existing = readBrainsJson();
+      } catch (err) {
+        return { content: [{ type: "text", text: `cannot read config: ${err.message}` }] };
+      }
+
+      const entry = existing.find(b => b.name === name);
+      if (!entry) return { content: [{ type: "text", text: `no brain named "${name}"` }] };
+      if (entry.primary) return { content: [{ type: "text", text: `cannot remove the primary brain "${name}"` }] };
+
+      // Stop timers before removing from config
+      stopBrainTimers(name);
+
+      // Remove from FTS index
+      const indexed = stmts.allFilesForBrain.all(name).map(r => r.path);
+      for (const relPath of indexed) removeFile(name, relPath);
+
+      // Write updated config (files on disk are preserved)
+      const updated = existing.filter(b => b.name !== name);
+      try {
+        writeBrainsJson(updated);
+      } catch (err) {
+        return { content: [{ type: "text", text: `failed to write config: ${err.message}` }] };
+      }
+
+      // Force reload to pick up the removal
+      brainsJsonMtime = 0;
+      reloadBrains();
+
+      return { content: [{ type: "text", text: `removed brain "${name}" from config (files preserved at ${entry.dir || "?"})` }] };
+    }
+
+    return { content: [{ type: "text", text: `unknown action "${action}"` }] };
   }
 );
 
@@ -935,6 +1246,7 @@ server.tool(
   "Dream: review memory health across all brains. Commits pending changes to git, shows history, finds cross-links, flags stale memories and conflicts. Use with /loop for periodic maintenance.",
   {},
   async () => {
+    getBrains(); // Lazy reload before accessing brains
     // Sync all brains before inspecting
     for (const brain of brains) syncBrain(brain);
 
@@ -1119,72 +1431,63 @@ function resolveDocPath(relPath) {
   return null;
 }
 
-const nonPrimaryBrains = brains.filter(b => !b.primary);
+// Deprecated: use grug-read with a brain parameter instead.
+server.tool(
+  "grug-docs",
+  "[Deprecated: use grug-read] Browse documentation brains (non-primary brains).",
+  {
+    category: z.string().optional().describe("Doc category to browse"),
+    path: z.string().optional().describe("File path to read"),
+    page: z.number().optional().describe("Page number for long files"),
+  },
+  async ({ category, path: target, page }) => {
+    // Use getBrains() so this reflects the current config after lazy reload
+    const currentNonPrimary = getBrains().filter(b => !b.primary);
 
-{
-  const docTotal = nonPrimaryBrains.reduce((sum, b) => sum + stmts.countForBrain.get(b.name).count, 0);
-
-  // Deprecated: use grug-read with a brain parameter instead.
-  server.tool(
-    "grug-docs",
-    `[Deprecated: use grug-read] Browse documentation brains. ${docTotal} docs across ${nonPrimaryBrains.length} non-primary brain(s).`,
-    {
-      category: z.string().optional().describe("Doc category to browse"),
-      path: z.string().optional().describe("File path to read"),
-      page: z.number().optional().describe("Page number for long files"),
-    },
-    async ({ category, path: target, page }) => {
-      // No args: list categories across all non-primary brains
-      if (!category && !target) {
-        const rows = stmts.allCategoryCounts.all().filter(r => r.brain !== primaryBrain.name);
-        if (rows.length === 0) return { content: [{ type: "text", text: "no docs found" }] };
-        const lines = rows.map(r => `  ${r.category}  (${r.count} docs)`);
-        return { content: [{ type: "text", text: `${rows.length} doc categories\n\n${lines.join("\n")}` }] };
-      }
-
-      // Path provided: resolve and read file
-      if (target) {
-        let filePath = resolveDocPath(target);
-        if (!filePath) filePath = resolve(target);
-        if (!filePath || !existsSync(filePath)) return { content: [{ type: "text", text: `file not found: ${target}` }] };
-        const content = readFile(filePath);
-        if (content === null) return { content: [{ type: "text", text: `could not read: ${target}` }] };
-        return { content: [{ type: "text", text: paginate(content, page) }] };
-      }
-
-      // Category only: list files in first matching non-primary brain
-      const matchingBrain = nonPrimaryBrains.find(b => {
-        return stmts.categoryCounts.all(b.name).some(r => r.category === category);
-      });
-      if (!matchingBrain) return { content: [{ type: "text", text: `no docs in "${category}"` }] };
-
-      const p = Math.max(1, page || 1);
-      const offset = (p - 1) * BROWSE_PAGE_SIZE;
-      const { total } = stmts.countByCategory.get(matchingBrain.name, category);
-      if (total === 0) return { content: [{ type: "text", text: `no docs in "${category}"` }] };
-      const rows = stmts.listByCategory.all(matchingBrain.name, category, BROWSE_PAGE_SIZE, offset);
-      const lines = rows.map(r => `- [${r.name}](${r.path}): ${r.description || ""}`);
-      const totalPages = Math.ceil(total / BROWSE_PAGE_SIZE);
-      const paging = totalPages > 1
-        ? `\n--- page ${p}/${totalPages} (${total} docs) | page:${p + 1} for more ---`
-        : "";
-      return { content: [{ type: "text", text: `# ${category} (${total} docs)\n\n${lines.join("\n")}${paging}` }] };
+    // No args: list categories across all non-primary brains
+    if (!category && !target) {
+      const rows = stmts.allCategoryCounts.all().filter(r => r.brain !== primaryBrain.name);
+      if (rows.length === 0) return { content: [{ type: "text", text: "no docs found" }] };
+      const lines = rows.map(r => `  ${r.category}  (${r.count} docs)`);
+      return { content: [{ type: "text", text: `${rows.length} doc categories\n\n${lines.join("\n")}` }] };
     }
-  );
-}
+
+    // Path provided: resolve and read file
+    if (target) {
+      let filePath = resolveDocPath(target);
+      if (!filePath) filePath = resolve(target);
+      if (!filePath || !existsSync(filePath)) return { content: [{ type: "text", text: `file not found: ${target}` }] };
+      const content = readFile(filePath);
+      if (content === null) return { content: [{ type: "text", text: `could not read: ${target}` }] };
+      return { content: [{ type: "text", text: paginate(content, page) }] };
+    }
+
+    // Category only: list files in first matching non-primary brain
+    const matchingBrain = currentNonPrimary.find(b => {
+      return stmts.categoryCounts.all(b.name).some(r => r.category === category);
+    });
+    if (!matchingBrain) return { content: [{ type: "text", text: `no docs in "${category}"` }] };
+
+    const p = Math.max(1, page || 1);
+    const offset = (p - 1) * BROWSE_PAGE_SIZE;
+    const { total } = stmts.countByCategory.get(matchingBrain.name, category);
+    if (total === 0) return { content: [{ type: "text", text: `no docs in "${category}"` }] };
+    const rows = stmts.listByCategory.all(matchingBrain.name, category, BROWSE_PAGE_SIZE, offset);
+    const lines = rows.map(r => `- [${r.name}](${r.path}): ${r.description || ""}`);
+    const totalPages = Math.ceil(total / BROWSE_PAGE_SIZE);
+    const paging = totalPages > 1
+      ? `\n--- page ${p}/${totalPages} (${total} docs) | page:${p + 1} for more ---`
+      : "";
+    return { content: [{ type: "text", text: `# ${category} (${total} docs)\n\n${lines.join("\n")}${paging}` }] };
+  }
+);
 
 const transport = new StdioServerTransport();
 await server.connect(transport);
 
-// --- per-brain sync timers ---
+// --- per-brain sync and refresh timers ---
+// startBrainTimers handles both git sync (writable) and doc refresh (read-only) timers.
 
 for (const brain of brains) {
-  if (!ensureGitRepo(brain)) continue;
-  if (brain.git === null && !hasRemote(brain)) continue;
-
-  let intervalMs = brain.syncInterval * 1000;
-  if (intervalMs < 10000) intervalMs = 10000;
-
-  setInterval(() => gitSync(brain), intervalMs);
-  process.stderr.write(`grug: sync enabled for ${brain.name} (${brain.syncInterval}s interval)\n`);
+  startBrainTimers(brain);
 }
