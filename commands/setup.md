@@ -1,5 +1,5 @@
 ---
-description: Install and verify grug-brain. Registers MCP server, checks dependencies, configures shared brain. Run after installing or updating.
+description: Install and verify grug-brain. Registers MCP server, checks dependencies, configures brains. Run after installing or updating.
 allowed-tools: Bash, Read
 ---
 
@@ -44,71 +44,96 @@ echo '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":
 
 If this returns a valid JSON response with `serverInfo`, the server is healthy. If it fails, read stderr for the error.
 
-## 5. Memory git repo
+## 5. brains.json configuration
 
-Check if the memories directory has git initialized:
+Check if `~/.grug-brain/brains.json` exists:
 
 ```bash
-MEMORY_DIR="${MEMORY_DIR:-$HOME/.grug-brain/memories}"
-cd "$MEMORY_DIR" && git rev-parse --git-dir 2>/dev/null
+cat ~/.grug-brain/brains.json 2>/dev/null
+```
+
+If the file does NOT exist, create it interactively:
+
+1. Tell the user: "No brains.json found. Let's create one. You need at least one primary brain for memories."
+2. Ask: "Where should the primary memories brain live? (default: `~/.grug-brain/memories`)"
+3. Ask: "Does this brain sync via git? If yes, provide the remote URL (e.g., `git@github.com:user/memories.git`). If no, press enter."
+4. Create `~/.grug-brain/` if it doesn't exist:
+   ```bash
+   mkdir -p ~/.grug-brain
+   ```
+5. Write the initial `~/.grug-brain/brains.json`:
+   ```json
+   [
+     {
+       "name": "memories",
+       "dir": "<chosen dir>",
+       "primary": true,
+       "writable": true,
+       "git": "<remote url or null>"
+     }
+   ]
+   ```
+
+If the file DOES exist, show the current brains and ask: "Do you want to add another brain?"
+
+### Adding additional brains
+
+If the user wants to add a brain, ask for:
+
+1. **Name** — short identifier (e.g., `grug-docs`, `work-notes`)
+2. **Directory** — local path (e.g., `/repos/grug-docs`, `~/notes`)
+3. **Type** — writable memory brain or read-only docs brain?
+4. **Flat** — does the directory contain files directly (no category subdirectories)? Flat brains are read-only by default.
+5. **Git remote** — URL or blank for local-only
+
+Add the entry to `~/.grug-brain/brains.json`. Example for a read-only flat docs brain:
+
+```json
+{
+  "name": "grug-docs",
+  "dir": "/repos/grug-docs",
+  "primary": false,
+  "writable": false,
+  "flat": false,
+  "git": null
+}
+```
+
+Repeat until the user says they're done.
+
+## 6. Primary brain git setup
+
+Check if the primary brain directory has git initialized:
+
+```bash
+PRIMARY_DIR=$(cat ~/.grug-brain/brains.json | python3 -c "import sys,json; brains=json.load(sys.stdin); print(next(b['dir'] for b in brains if b.get('primary')))" 2>/dev/null || echo "${HOME}/.grug-brain/memories")
+cd "$PRIMARY_DIR" && git rev-parse --git-dir 2>/dev/null
 ```
 
 If not a git repo, it will auto-initialize on the first `grug-write`.
 
-## 6. Shared brain
+If the primary brain has a `git` remote configured in brains.json but git is not yet set up, initialize and connect:
 
-Ask the user: **"Do you want to connect a shared brain? This syncs memories across machines via a git remote."**
+```bash
+cd "$PRIMARY_DIR"
+git init 2>/dev/null
+git remote add origin <remote-url> 2>/dev/null || true
+git pull origin main --rebase 2>/dev/null || git pull origin master --rebase 2>/dev/null || true
+git add -A && git commit -m "grug: initial sync" --quiet 2>/dev/null || true
+git push -u origin main 2>/dev/null || git push -u origin master 2>/dev/null || true
+```
 
-If yes:
+Tell the user: sync runs automatically every 60 seconds while the MCP server is running. Memories in the `local/` category are never synced (add `sync: false` to frontmatter to keep individual files local).
 
-1. Ask for the remote repo URL (e.g., `https://github.com/user/grug-memories.git` or `git@github.com:user/grug-memories.git`)
-2. Initialize the memory git repo if needed:
-   ```bash
-   MEMORY_DIR="${MEMORY_DIR:-$HOME/.grug-brain/memories}"
-   cd "$MEMORY_DIR"
-   git init 2>/dev/null
-   ```
-3. Check if a remote already exists:
-   ```bash
-   cd "$MEMORY_DIR" && git remote -v
-   ```
-4. If no remote, add one:
-   ```bash
-   cd "$MEMORY_DIR" && git remote add origin <repo-url>
-   ```
-5. Do an initial pull (if the remote repo already has content):
-   ```bash
-   cd "$MEMORY_DIR" && git pull origin main --rebase 2>/dev/null || git pull origin master --rebase 2>/dev/null
-   ```
-6. Push current memories:
-   ```bash
-   cd "$MEMORY_DIR" && git add -A && git commit -m "grug: initial sync" --quiet 2>/dev/null; git push -u origin main 2>/dev/null || git push -u origin master 2>/dev/null
-   ```
-
-Tell the user: sync runs automatically every 60 seconds while the MCP server is running. Memories in the `local/` category are never synced.
-
-If no, skip. Sync can be configured later by re-running `/setup`.
-
-## 7. Shared docs
-
-Ask the user: **"Do you want to ingest shared docs? This gives grug searchable reference documentation."**
-
-If yes, ask for a GitHub repo URL containing docs (e.g., `github:org/grug-docs`). Then run `/ingest` with that source.
-
-If the user doesn't have a docs repo, suggest they can ingest individual doc sets later with `/ingest`.
-
-Docs do NOT sync via the shared brain — they are ingested locally per machine from a shared source. This keeps the memory sync lightweight.
-
-## 8. Summary
+## 7. Summary
 
 Report:
 - Bun: version or missing
 - Dependencies: installed / error
 - MCP server: registered + healthy / needs restart
-- Memories: count of `.md` files, git status
-- Shared brain: connected (remote URL) / local only
-- Docs: count if docs/ exists, or "none"
+- Brains: list each brain (name, dir, file count, writable, git-synced)
+- Conflicts: count if any entries in the `conflicts/` category
 - Available commands: `/dream`, `/setup`, `/ingest`
-- Available tools: grug-write, grug-search, grug-read, grug-recall, grug-delete, grug-dream, grug-docs
+- Available tools: grug-write, grug-search, grug-read, grug-recall, grug-delete, grug-dream
 
 If the MCP server was just registered or updated, tell the user to restart Claude Code for changes to take effect.

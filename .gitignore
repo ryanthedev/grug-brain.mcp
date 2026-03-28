@@ -1,10 +1,20 @@
-# generated at runtime
+# unified database (lives at ~/.grug-brain/grug.db, not in repo)
+*.db
+*.db-wal
+*.db-shm
+
+# old per-brain database locations (pre-v3)
 memories/.grug-brain.db
 memories/.grug-brain.db-wal
 memories/.grug-brain.db-shm
-memories/recall.md
 memories/.docs.db
 memories/.docs.db-wal
 memories/.docs.db-shm
+
+# runtime files
+memories/recall.md
+
+# ingested docs (managed via brains.json, not committed)
 docs/
+
 node_modules/
