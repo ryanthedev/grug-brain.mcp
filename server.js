@@ -1,5 +1,7 @@
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
+import { WebStandardStreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/webStandardStreamableHttp.js";
+import { isInitializeRequest } from "@modelcontextprotocol/sdk/types.js";
 import { z } from "zod";
 import { Database } from "bun:sqlite";
 import {
@@ -8,10 +10,20 @@ import {
 } from "fs";
 import { join, resolve, relative, basename, dirname, extname } from "path";
 import { fileURLToPath } from "url";
-import { execFileSync } from "child_process";
+import { execFile as execFileCb } from "child_process";
+import { promisify } from "util";
 import { hostname as osHostname } from "os";
+import { appendFileSync } from "fs";
+
+const GRUG_LOG = join(process.env.HOME || "/tmp", ".grug-brain", "grug.log");
+function grugLog(msg) {
+  const line = `${new Date().toISOString()} ${msg}\n`;
+  process.stderr.write(line);
+  try { appendFileSync(GRUG_LOG, line); } catch {}
+}
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
+const execFileAsync = promisify(execFileCb);
 
 // --- brain config ---
 
@@ -242,27 +254,34 @@ function releaseSyncLock(brain) {
   syncLocks.set(brain.name, false);
 }
 
-function git(brain, ...args) {
+async function git(brain, ...args) {
+  const t0 = Date.now();
   try {
-    return execFileSync("git", args, {
+    const { stdout } = await execFileAsync("git", args, {
       cwd: brain.dir, encoding: "utf-8", timeout: 10000,
-      stdio: ["pipe", "pipe", "pipe"],
-    }).trim();
-  } catch { return null; }
+    });
+    const elapsed = Date.now() - t0;
+    if (elapsed > 1000) grugLog(`[git] ${brain.name} ${args[0]} — slow ${elapsed}ms`);
+    return stdout.trim();
+  } catch (err) {
+    const elapsed = Date.now() - t0;
+    if (elapsed > 1000) grugLog(`[git] ${brain.name} ${args[0]} — failed ${elapsed}ms`);
+    return null;
+  }
 }
 
-function ensureGitRepo(brain) {
-  if (git(brain, "rev-parse", "--git-dir") === ".git") return true;
-  if (git(brain, "init") === null) return false;
+async function ensureGitRepo(brain) {
+  if (await git(brain, "rev-parse", "--git-dir") === ".git") return true;
+  if (await git(brain, "init") === null) return false;
   const ignore = "*.db\n*.db-wal\n*.db-shm\nrecall.md\nlocal/\n.grugignore\n";
   writeFileSync(join(brain.dir, ".gitignore"), ignore, "utf-8");
-  git(brain, "add", ".gitignore");
-  git(brain, "commit", "-m", "grug: init");
+  await git(brain, "add", ".gitignore");
+  await git(brain, "commit", "-m", "grug: init");
   return true;
 }
 
-function hasRemote(brain) {
-  const remote = git(brain, "remote");
+async function hasRemote(brain) {
+  const remote = await git(brain, "remote");
   return remote !== null && remote.length > 0;
 }
 
@@ -288,8 +307,8 @@ function isLocalFile(brain, relPath, content) {
   return false;
 }
 
-function syncGitExclude(brain) {
-  if (!ensureGitRepo(brain)) return;
+async function syncGitExclude(brain) {
+  if (!await ensureGitRepo(brain)) return;
   const lines = ["# managed by grug-brain", ".grugignore"];
   lines.push(...loadGrugIgnore(brain));
   // Walk brain directory to find sync:false files
@@ -303,25 +322,25 @@ function syncGitExclude(brain) {
   writeFileSync(join(brain.dir, ".git", "info", "exclude"), lines.join("\n") + "\n", "utf-8");
 }
 
-function gitCommitFile(brain, relPath, action) {
-  if (!ensureGitRepo(brain)) return;
+async function gitCommitFile(brain, relPath, action) {
+  if (!await ensureGitRepo(brain)) return;
   if (syncLocks.get(brain.name) === true) return;
   if (action !== "delete") {
     const content = readFile(join(brain.dir, relPath));
     if (isLocalFile(brain, relPath, content)) {
-      syncGitExclude(brain);
+      await syncGitExclude(brain);
       return;
     }
   }
-  git(brain, "add", "--", relPath);
-  git(brain, "commit", "-m", `grug: ${action} ${relPath}`, "--quiet");
+  await git(brain, "add", "--", relPath);
+  await git(brain, "commit", "-m", `grug: ${action} ${relPath}`, "--quiet");
 }
 
-function resolveRebaseConflict(brain) {
-  const unmergedOutput = git(brain, "diff", "--name-only", "--diff-filter=U");
+async function resolveRebaseConflict(brain) {
+  const unmergedOutput = await git(brain, "diff", "--name-only", "--diff-filter=U");
   if (!unmergedOutput || unmergedOutput.length === 0) {
     process.stderr.write(`grug: conflict detected in ${brain.name} but no unmerged files found\n`);
-    git(brain, "rebase", "--abort");
+    await git(brain, "rebase", "--abort");
     return;
   }
 
@@ -331,7 +350,7 @@ function resolveRebaseConflict(brain) {
   const dateStr = today();
 
   for (const filePath of conflictFiles) {
-    const localContent = git(brain, "show", `REBASE_HEAD:${filePath}`);
+    const localContent = await git(brain, "show", `REBASE_HEAD:${filePath}`);
     if (localContent === null) {
       process.stderr.write(`grug: could not retrieve local version of ${filePath} in ${brain.name}\n`);
       continue;
@@ -376,19 +395,19 @@ function resolveRebaseConflict(brain) {
     }
   }
 
-  git(brain, "rebase", "--abort");
+  await git(brain, "rebase", "--abort");
 
-  const remoteBranch = git(brain, "rev-parse", "--abbrev-ref", "@{upstream}");
+  const remoteBranch = await git(brain, "rev-parse", "--abbrev-ref", "@{upstream}");
   if (remoteBranch !== null) {
-    git(brain, "reset", "--hard", remoteBranch);
+    await git(brain, "reset", "--hard", remoteBranch);
   } else {
-    const mainRef = git(brain, "rev-parse", "--verify", "origin/main");
+    const mainRef = await git(brain, "rev-parse", "--verify", "origin/main");
     if (mainRef !== null) {
-      git(brain, "reset", "--hard", "origin/main");
+      await git(brain, "reset", "--hard", "origin/main");
     } else {
-      const masterRef = git(brain, "rev-parse", "--verify", "origin/master");
+      const masterRef = await git(brain, "rev-parse", "--verify", "origin/master");
       if (masterRef !== null) {
-        git(brain, "reset", "--hard", "origin/master");
+        await git(brain, "reset", "--hard", "origin/master");
       }
     }
   }
@@ -396,29 +415,42 @@ function resolveRebaseConflict(brain) {
   syncBrain(brain);
 }
 
-function gitSync(brain) {
-  if (!ensureGitRepo(brain)) return;
-  if (!hasRemote(brain)) return;
-  if (!acquireSyncLock(brain)) return;
+async function gitSync(brain) {
+  if (!await ensureGitRepo(brain)) return;
+  if (!await hasRemote(brain)) return;
+  if (!acquireSyncLock(brain)) {
+    grugLog(`[gitSync] ${brain.name} — skipped (lock held)`);
+    return;
+  }
 
+  const t0 = Date.now();
+  grugLog(`[gitSync] ${brain.name} — start`);
   try {
-    syncGitExclude(brain);
-    const before = git(brain, "rev-parse", "HEAD");
+    await syncGitExclude(brain);
+    const before = await git(brain, "rev-parse", "HEAD");
 
-    const pullResult = git(brain, "pull", "--rebase", "--quiet");
+    const pullResult = await git(brain, "pull", "--rebase", "--quiet");
 
     if (pullResult === null) {
       const rebaseHeadPath = join(brain.dir, ".git", "REBASE_HEAD");
       if (existsSync(rebaseHeadPath)) {
         process.stderr.write(`grug: rebase conflict detected in ${brain.name}\n`);
-        resolveRebaseConflict(brain);
+        await resolveRebaseConflict(brain);
       }
+      grugLog(`[gitSync] ${brain.name} — done (pull failed) ${Date.now() - t0}ms`);
       return;
     }
 
-    const after = git(brain, "rev-parse", "HEAD");
-    git(brain, "push", "--quiet");
-    if (before !== after) syncBrain(brain);
+    const after = await git(brain, "rev-parse", "HEAD");
+    await git(brain, "push", "--quiet");
+    // Reindex if remote changed OR local has new/modified files.
+    // git status is cheap; syncBrain walks every file so skip it when idle.
+    const dirty = before !== after || await git(brain, "status", "--porcelain") !== "";
+    if (dirty) {
+      grugLog(`[gitSync] ${brain.name} — dirty, running syncBrain`);
+      syncBrain(brain);
+    }
+    grugLog(`[gitSync] ${brain.name} — done ${Date.now() - t0}ms`);
   } finally {
     releaseSyncLock(brain);
   }
@@ -627,6 +659,8 @@ function removeFile(brainName, relPath) {
 }
 
 function syncBrain(brain) {
+  const t0 = Date.now();
+  grugLog(`[syncBrain] ${brain.name} — start`);
   const indexed = new Set(stmts.allFilesForBrain.all(brain.name).map(r => r.path));
   const onDisk = new Set();
 
@@ -654,9 +688,11 @@ function syncBrain(brain) {
     }
   }
 
+  let removed = 0;
   for (const path of indexed) {
-    if (!onDisk.has(path)) removeFile(brain.name, path);
+    if (!onDisk.has(path)) { removeFile(brain.name, path); removed++; }
   }
+  grugLog(`[syncBrain] ${brain.name} — done ${Date.now() - t0}ms (${onDisk.size} on disk, ${removed} removed)`);
 }
 
 // --- timer lifecycle ---
@@ -673,13 +709,13 @@ const MIN_REFRESH_INTERVAL_S = 3600;
 // Pulls latest content for a read-only brain from its git source, then reindexes.
 // Only runs for non-writable brains with a source field and a configured refreshInterval.
 // Failures are logged to stderr and never thrown — the server stays running.
-function refreshBrain(brain) {
+async function refreshBrain(brain) {
   if (brain.writable) return; // Sync (not refresh) handles writable brains
   if (!brain.source) return;  // No source to pull from
 
   try {
     // git pull --ff-only: safe for read-only clones; fails cleanly if upstream rebased
-    const result = git(brain, "pull", "--ff-only", "--quiet");
+    const result = await git(brain, "pull", "--ff-only", "--quiet");
     if (result === null) {
       process.stderr.write(`grug: refresh skipped for ${brain.name} (ff-only failed — upstream may have rebased)\n`);
       return;
@@ -693,14 +729,14 @@ function refreshBrain(brain) {
 
 // Starts sync and/or refresh timers for a single brain.
 // Idempotent: if timers already exist for this brain, they are replaced.
-function startBrainTimers(brain) {
+async function startBrainTimers(brain) {
   stopBrainTimers(brain.name); // Clear any existing timers first
 
-  if (brain.git !== null || hasRemote(brain)) {
-    if (!ensureGitRepo(brain)) return;
+  if (brain.git !== null || await hasRemote(brain)) {
+    if (!await ensureGitRepo(brain)) return;
     let syncIntervalMs = brain.syncInterval * 1000;
     if (syncIntervalMs < 10000) syncIntervalMs = 10000; // Minimum 10s to prevent hammering git
-    const timerId = setInterval(() => gitSync(brain), syncIntervalMs);
+    const timerId = setInterval(() => gitSync(brain).catch(err => grugLog(`[gitSync] ${brain.name} — error: ${err.message}`)), syncIntervalMs);
     syncTimers.set(brain.name, timerId);
     process.stderr.write(`grug: sync enabled for ${brain.name} (${brain.syncInterval}s interval)\n`);
   }
@@ -711,7 +747,7 @@ function startBrainTimers(brain) {
       process.stderr.write(`grug: refresh interval for ${brain.name} clamped to ${MIN_REFRESH_INTERVAL_S}s (was ${refreshIntervalS}s)\n`);
       refreshIntervalS = MIN_REFRESH_INTERVAL_S;
     }
-    const timerId = setInterval(() => refreshBrain(brain), refreshIntervalS * 1000);
+    const timerId = setInterval(() => refreshBrain(brain).catch(err => grugLog(`[refreshBrain] ${brain.name} — error: ${err.message}`)), refreshIntervalS * 1000);
     refreshTimers.set(brain.name, timerId);
     process.stderr.write(`grug: refresh enabled for ${brain.name} (${refreshIntervalS}s interval)\n`);
   }
@@ -741,7 +777,16 @@ for (const brain of brains) {
   process.stderr.write(`grug: brain "${brain.name}" — ${count} files${detail}\n`);
 }
 
-syncGitExclude(primaryBrain);
+await syncGitExclude(primaryBrain);
+
+// Event loop block detector — logs when the loop was blocked for >500ms
+let lastTick = Date.now();
+setInterval(() => {
+  const now = Date.now();
+  const gap = now - lastTick;
+  if (gap > 500) grugLog(`[heartbeat] event loop blocked for ${gap}ms`);
+  lastTick = now;
+}, 200);
 
 // ============================================================
 // SEARCH (both databases, merged by rank)
@@ -785,7 +830,14 @@ function searchAll(query, page = 1) {
 // SERVER + TOOLS
 // ============================================================
 
-const server = new McpServer({ name: "grug-brain", version: "3.0.0" });
+function createServer() {
+  return new McpServer({ name: "grug-brain", version: "3.2.0" });
+}
+
+// Default server for stdio mode; HTTP mode creates one per session.
+const server = createServer();
+
+function registerTools(server) {
 
 // --- grug-write ---
 
@@ -820,7 +872,7 @@ server.tool(
     writeFileSync(filePath, fileContent, "utf-8");
     const relPath = relative(brain.dir, filePath);
     indexFile(brain.name, relPath, filePath, cat);
-    gitCommitFile(brain, relPath, exists ? "update" : "write");
+    await gitCommitFile(brain, relPath, exists ? "update" : "write");
 
     return { content: [{ type: "text", text: `${exists ? "updated" : "created"} ${relPath}` }] };
   }
@@ -836,8 +888,11 @@ server.tool(
     page: z.number().optional().describe("Page number (20 results per page)"),
   },
   async ({ query, page }) => {
+    const t0 = Date.now();
+    grugLog(`[grug-search] query="${query}" — enter`);
     getBrains(); // Lazy reload before accessing brains
     const { results, total } = searchAll(query, page);
+    grugLog(`[grug-search] query="${query}" — ${total} results ${Date.now() - t0}ms`);
     if (total === 0) return { content: [{ type: "text", text: `no matches for "${query}"` }] };
 
     const lines = [];
@@ -868,6 +923,8 @@ server.tool(
     path: z.string().optional().describe("Filename within the category to read"),
   },
   async ({ brain: brainName, category, path: name }) => {
+    const t0 = Date.now();
+    grugLog(`[grug-read] brain=${brainName || "-"} cat=${category || "-"} path=${name || "-"} — enter`);
     const currentBrains = getBrains(); // Lazy reload before accessing brains
     // No args: list all brains with status
     if (!brainName && !category && !name) {
@@ -945,10 +1002,16 @@ server.tool(
     const t = file.endsWith(".md") ? file : `${file}.md`;
     // Flat brains: files live directly in brain.dir, not in a category subdir
     const filePath = brain.flat ? join(brain.dir, t) : join(brain.dir, cat, t);
-    if (!existsSync(filePath)) return { content: [{ type: "text", text: `not found: ${brain.name}/${cat}/${file}` }] };
+    if (!existsSync(filePath)) {
+      grugLog(`[grug-read] ${brain.name}/${cat}/${file} — not found ${Date.now() - t0}ms`);
+      return { content: [{ type: "text", text: `not found: ${brain.name}/${cat}/${file}` }] };
+    }
 
     const content = readFile(filePath);
-    if (content === null) return { content: [{ type: "text", text: `could not read: ${brain.name}/${cat}/${file}` }] };
+    if (content === null) {
+      grugLog(`[grug-read] ${brain.name}/${cat}/${file} — read failed ${Date.now() - t0}ms`);
+      return { content: [{ type: "text", text: `could not read: ${brain.name}/${cat}/${file}` }] };
+    }
 
     const relPath = `${cat}/${t}`;
     const linked = stmts.getLinks.all(brain.name, relPath, brain.name, relPath);
@@ -963,6 +1026,7 @@ server.tool(
       text += `\n\n---\n## linked memories\n\n${linkLines.join("\n")}`;
     }
 
+    grugLog(`[grug-read] ${brain.name}/${cat}/${file} — ok ${text.length} bytes ${Date.now() - t0}ms`);
     return { content: [{ type: "text", text }] };
   }
 );
@@ -1042,7 +1106,7 @@ server.tool(
 
     unlinkSync(filePath);
     removeFile(brain.name, `${category}/${t}`);
-    gitCommitFile(brain, `${category}/${t}`, "delete");
+    await gitCommitFile(brain, `${category}/${t}`, "delete");
 
     return { content: [{ type: "text", text: `deleted ${category}/${t}` }] };
   }
@@ -1212,6 +1276,35 @@ server.tool(
   }
 );
 
+// --- grug-sync ---
+
+server.tool(
+  "grug-sync",
+  "Reindex a brain (or all brains) from disk. Use after adding files outside of grug-write, e.g. copying transcriptions into a brain directory.",
+  {
+    brain: z.string().optional().describe("Brain to reindex (omit to reindex all brains)"),
+  },
+  async ({ brain: brainName }) => {
+    getBrains();
+    const targets = brainName
+      ? brains.filter(b => b.name === brainName)
+      : brains;
+    if (brainName && targets.length === 0) {
+      return { content: [{ type: "text", text: `unknown brain "${brainName}"` }] };
+    }
+    const results = [];
+    for (const brain of targets) {
+      const before = stmts.countForBrain.get(brain.name).count;
+      syncBrain(brain);
+      const after = stmts.countForBrain.get(brain.name).count;
+      const diff = after - before;
+      const delta = diff > 0 ? ` (+${diff} new)` : diff < 0 ? ` (${diff} removed)` : "";
+      results.push(`${brain.name}: ${after} files${delta}`);
+    }
+    return { content: [{ type: "text", text: results.join("\n") }] };
+  }
+);
+
 // --- grug-dream ---
 
 // Collect all memories across all brains that need review.
@@ -1228,14 +1321,14 @@ function collectAllMemories() {
 // Commit pending changes for a single writable brain with git.
 // Acquires sync lock to prevent concurrent git operations.
 // Returns the git log string, or null if git is unavailable.
-function dreamCommitBrain(brain) {
-  if (!ensureGitRepo(brain)) return null;
+async function dreamCommitBrain(brain) {
+  if (!await ensureGitRepo(brain)) return null;
   if (!acquireSyncLock(brain)) return null;
   try {
-    syncGitExclude(brain);
-    git(brain, "add", "-A");
-    git(brain, "commit", "-m", "grug: dream sync", "--quiet");
-    return git(brain, "log", "--oneline", "--name-status", "-15", "--", ".");
+    await syncGitExclude(brain);
+    await git(brain, "add", "-A");
+    await git(brain, "commit", "-m", "grug: dream sync", "--quiet");
+    return await git(brain, "log", "--oneline", "--name-status", "-15", "--", ".");
   } finally {
     releaseSyncLock(brain);
   }
@@ -1260,11 +1353,14 @@ server.tool(
     const sections = [];
 
     // --- commit pending changes per writable brain with git ---
-    const writableGitBrains = brains.filter(b => b.writable && ensureGitRepo(b));
+    const writableGitBrains = [];
+    for (const b of brains) {
+      if (b.writable && await ensureGitRepo(b)) writableGitBrains.push(b);
+    }
     if (writableGitBrains.length > 0) {
       const historyLines = [];
       for (const brain of writableGitBrains) {
-        const log = dreamCommitBrain(brain);
+        const log = await dreamCommitBrain(brain);
         if (log) {
           historyLines.push(`### ${brain.name}\n\n\`\`\`\n${log}\n\`\`\``);
         } else {
@@ -1482,8 +1578,87 @@ server.tool(
   }
 );
 
-const transport = new StdioServerTransport();
-await server.connect(transport);
+} // end registerTools
+
+registerTools(server);
+
+// --- transport setup ---
+// Use --stdio flag for stdio transport, otherwise default to HTTP.
+
+const useStdio = process.argv.includes("--stdio");
+const GRUG_PORT = parseInt(process.env.GRUG_PORT || "6483", 10);
+
+if (useStdio) {
+  const transport = new StdioServerTransport();
+  await server.connect(transport);
+  grugLog(`[transport] stdio connected`);
+
+  // Exit when stdin closes — parent session (e.g. Claude Code) disconnected.
+  // Without this, setInterval timers keep the process alive as a zombie,
+  // and dozens of stale processes pile up fighting over git and SQLite.
+  function shutdown() {
+    grugLog(`[transport] stdin closed, shutting down`);
+    for (const brain of brains) stopBrainTimers(brain.name);
+    process.exit(0);
+  }
+  process.stdin.on("end", shutdown);
+  process.stdin.on("close", shutdown);
+} else {
+  // HTTP transport: one McpServer + transport per session.
+  // McpServer only allows one transport, so each client session gets its own instance.
+  const sessions = new Map(); // sessionId -> { server, transport }
+
+  Bun.serve({
+    port: GRUG_PORT,
+    idleTimeout: 255, // seconds — max allowed by Bun; prevents timeout during git sync
+    async fetch(req) {
+      const url = new URL(req.url);
+      if (url.pathname !== "/mcp") {
+        return new Response(JSON.stringify({ error: "not found" }), {
+          status: 404,
+          headers: { "Content-Type": "application/json" },
+        });
+      }
+
+      const sessionId = req.headers.get("mcp-session-id");
+
+      if (sessionId && sessions.has(sessionId)) {
+        const { transport } = sessions.get(sessionId);
+        return transport.handleRequest(req);
+      }
+
+      if (!sessionId && req.method === "POST") {
+        const body = await req.json();
+        if (isInitializeRequest(body)) {
+          const sessionServer = createServer();
+          registerTools(sessionServer);
+          const transport = new WebStandardStreamableHTTPServerTransport({
+            sessionIdGenerator: () => crypto.randomUUID(),
+            onsessioninitialized: (sid) => {
+              sessions.set(sid, { server: sessionServer, transport });
+              grugLog(`[transport] session created ${sid}`);
+            },
+          });
+          transport.onclose = () => {
+            const sid = transport.sessionId;
+            if (sid) sessions.delete(sid);
+            grugLog(`[transport] session closed ${sid}`);
+          };
+          await sessionServer.connect(transport);
+          return transport.handleRequest(req, { parsedBody: body });
+        }
+      }
+
+      return new Response(JSON.stringify({
+        jsonrpc: "2.0",
+        error: { code: -32000, message: "Bad Request: no valid session" },
+        id: null,
+      }), { status: 400, headers: { "Content-Type": "application/json" } });
+    },
+  });
+
+  grugLog(`[transport] HTTP listening on port ${GRUG_PORT}`);
+}
 
 // --- per-brain sync and refresh timers ---
 // startBrainTimers handles both git sync (writable) and doc refresh (read-only) timers.
