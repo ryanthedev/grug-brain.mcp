@@ -5,6 +5,28 @@ allowed-tools: Bash, Read, Write
 
 Run these checks in order. Fix problems as you find them. Report a summary at the end.
 
+## 0. Update check
+
+If the service is already running (health check passes), this is an **update**, not a fresh install.
+
+```bash
+curl -sf http://localhost:${GRUG_PORT:-6483}/mcp -X POST \
+  -H "Content-Type: application/json" \
+  -d '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2024-11-05","capabilities":{},"clientInfo":{"name":"setup","version":"1.0"}}}' \
+  -o /dev/null 2>/dev/null && echo "RUNNING" || echo "NOT_RUNNING"
+```
+
+**If RUNNING** — skip to the fast update path:
+
+1. `bun install` in `${CLAUDE_PLUGIN_ROOT}` (pick up any new deps)
+2. Restart the service:
+   - macOS: `launchctl kickstart -k gui/$(id -u)/com.grug-brain.mcp`
+   - Linux: `systemctl --user restart grug-brain.service`
+3. Wait 2 seconds, verify health check again
+4. Skip to **step 8 (Summary)**
+
+**If NOT_RUNNING** — continue with full setup below.
+
 ## 1. Bun runtime
 
 `bun --version` must work. If it doesn't, tell the user to install Bun: `curl -fsSL https://bun.sh/install | bash`

@@ -168,7 +168,7 @@ function reloadBrains() {
   const currentNames = new Set(brains.map(b => b.name));
   for (const brain of newBrains) {
     if (!currentNames.has(brain.name)) {
-      syncBrain(brain);
+      syncBrainAsync(brain).catch(err => grugLog(`[syncBrain] ${brain.name} — error: ${err.message}`));
       startBrainTimers(brain);
     }
   }
@@ -178,6 +178,7 @@ function reloadBrains() {
   for (const brain of brains) {
     if (!newNames.has(brain.name)) {
       stopBrainTimers(brain.name);
+      terminateBrainWorker(brain.name);
       // Remove from FTS
       const indexed = stmts.allFilesForBrain.all(brain.name).map(r => r.path);
       for (const relPath of indexed) removeFile(brain.name, relPath);
@@ -412,7 +413,7 @@ async function resolveRebaseConflict(brain) {
     }
   }
 
-  syncBrain(brain);
+  await syncBrainAsync(brain);
 }
 
 async function gitSync(brain) {
@@ -448,7 +449,7 @@ async function gitSync(brain) {
     const dirty = before !== after || await git(brain, "status", "--porcelain") !== "";
     if (dirty) {
       grugLog(`[gitSync] ${brain.name} — dirty, running syncBrain`);
-      syncBrain(brain);
+      await syncBrainAsync(brain);
     }
     grugLog(`[gitSync] ${brain.name} — done ${Date.now() - t0}ms`);
   } finally {
@@ -569,6 +570,7 @@ const stmts = {
   deleteFile: db.prepare("DELETE FROM files WHERE brain = ? AND path = ?"),
   allFiles: db.prepare("SELECT brain, path FROM files"),
   allFilesForBrain: db.prepare("SELECT path FROM files WHERE brain = ?"),
+  allFilesWithMtimeForBrain: db.prepare("SELECT path, mtime FROM files WHERE brain = ?"),
   insertFts: db.prepare("INSERT INTO brain_fts (path, brain, category, name, date, description, body) VALUES (?, ?, ?, ?, ?, ?, ?)"),
   deleteFts: db.prepare("DELETE FROM brain_fts WHERE brain = ? AND path = ?"),
   searchCount: db.prepare("SELECT COUNT(*) as total FROM brain_fts WHERE brain_fts MATCH ?"),
@@ -588,24 +590,19 @@ const stmts = {
   countForBrain: db.prepare("SELECT COUNT(*) as count FROM files WHERE brain = ?"),
   upsertLink: db.prepare("INSERT OR REPLACE INTO cross_links (brain_a, path_a, brain_b, path_b, score, created_at) VALUES (?, ?, ?, ?, ?, ?)"),
   deleteLinks: db.prepare("DELETE FROM cross_links WHERE (brain_a = ? AND path_a = ?) OR (brain_b = ? AND path_b = ?)"),
-  getLinks: db.prepare(`
-    SELECT brain_a, path_a, brain_b, path_b, score,
-           m1.name as name_a, m1.category as cat_a,
-           m2.name as name_b, m2.category as cat_b
+  getLinksRaw: db.prepare(`
+    SELECT brain_a, path_a, brain_b, path_b, score
     FROM cross_links
-    JOIN brain_fts m1 ON m1.brain = brain_a AND m1.path = path_a
-    JOIN brain_fts m2 ON m2.brain = brain_b AND m2.path = path_b
     WHERE (brain_a = ? AND path_a = ?) OR (brain_b = ? AND path_b = ?)
     ORDER BY score
     LIMIT 10
   `),
-  allLinks: db.prepare(`
-    SELECT brain_a, path_a, brain_b, path_b, score,
-           m1.name as name_a, m1.category as cat_a,
-           m2.name as name_b, m2.category as cat_b
+  getLinkMeta: db.prepare(`
+    SELECT name, category FROM brain_fts WHERE brain = ? AND path = ? LIMIT 1
+  `),
+  allLinksRaw: db.prepare(`
+    SELECT brain_a, path_a, brain_b, path_b, score
     FROM cross_links
-    JOIN brain_fts m1 ON m1.brain = brain_a AND m1.path = path_a
-    JOIN brain_fts m2 ON m2.brain = brain_b AND m2.path = path_b
     ORDER BY score
     LIMIT 20
   `),
@@ -658,41 +655,89 @@ function removeFile(brainName, relPath) {
   stmts.deleteLinks.run(brainName, relPath, brainName, relPath);
 }
 
-function syncBrain(brain) {
+// --- index workers (one thread per brain for parallel file I/O and parsing) ---
+
+const brainWorkers = new Map(); // brain name -> Worker
+let nextSyncId = 0;
+const pendingSyncs = new Map();
+
+const APPLY_BATCH_SIZE = 50; // yield to event loop every N inserts
+
+async function applyWorkerResult(data) {
+  const { id, brainName, brainDir, brainFlat, toIndex, toRemove, categories, onDiskCount, duration } = data;
   const t0 = Date.now();
-  grugLog(`[syncBrain] ${brain.name} — start`);
-  const indexed = new Set(stmts.allFilesForBrain.all(brain.name).map(r => r.path));
-  const onDisk = new Set();
 
-  if (brain.flat) {
-    // Flat brain: all files in dir get category = brain name
-    catBrainDir.set(brain.name, brain.dir);
-    for (const fullPath of walkFiles(brain.dir)) {
-      const relPath = relative(brain.dir, fullPath);
-      onDisk.add(relPath);
-      const row = stmts.getFile.get(brain.name, relPath);
-      const mtime = statSync(fullPath).mtimeMs;
-      if (!row || row.mtime !== mtime) indexFile(brain.name, relPath, fullPath, brain.name);
-    }
+  // Update catBrainDir
+  if (brainFlat) {
+    catBrainDir.set(brainName, brainDir);
   } else {
-    // Category brain: each subdirectory is a category
-    for (const cat of getCategories(brain.dir)) {
-      catBrainDir.set(cat, brain.dir);
-      for (const fullPath of walkFiles(join(brain.dir, cat))) {
-        const relPath = relative(brain.dir, fullPath);
-        onDisk.add(relPath);
-        const row = stmts.getFile.get(brain.name, relPath);
-        const mtime = statSync(fullPath).mtimeMs;
-        if (!row || row.mtime !== mtime) indexFile(brain.name, relPath, fullPath, cat);
-      }
+    for (const cat of categories) {
+      catBrainDir.set(cat, brainDir);
     }
   }
 
-  let removed = 0;
-  for (const path of indexed) {
-    if (!onDisk.has(path)) { removeFile(brain.name, path); removed++; }
+  // Apply index changes to SQLite in batches, yielding between chunks
+  for (let i = 0; i < toIndex.length; i++) {
+    const item = toIndex[i];
+    stmts.deleteFts.run(brainName, item.relPath);
+    stmts.insertFts.run(item.relPath, brainName, item.category, item.name, item.date, item.desc, item.body);
+    stmts.upsertFile.run(brainName, item.relPath, item.mtime);
+    if ((i + 1) % APPLY_BATCH_SIZE === 0 && i + 1 < toIndex.length) {
+      await new Promise(r => setTimeout(r, 0));
+    }
   }
-  grugLog(`[syncBrain] ${brain.name} — done ${Date.now() - t0}ms (${onDisk.size} on disk, ${removed} removed)`);
+  for (const relPath of toRemove) {
+    removeFile(brainName, relPath);
+  }
+
+  const applyMs = Date.now() - t0;
+  grugLog(`[syncBrain] ${brainName} — done (worker ${duration}ms, apply ${applyMs}ms, ${onDiskCount} on disk, ${toRemove.length} removed, ${toIndex.length} indexed)`);
+
+  const pending = pendingSyncs.get(id);
+  if (pending) {
+    pending.resolve({ onDiskCount, removed: toRemove.length, indexed: toIndex.length });
+    pendingSyncs.delete(id);
+  }
+}
+
+function handleWorkerMessage(event) {
+  if (event.data.type !== "sync-result") return;
+  applyWorkerResult(event.data);
+}
+
+function getBrainWorker(brainName) {
+  let worker = brainWorkers.get(brainName);
+  if (!worker) {
+    worker = new Worker(new URL("./index-worker.js", import.meta.url));
+    worker.onmessage = handleWorkerMessage;
+    worker.onerror = (err) => grugLog(`[index-worker:${brainName}] error: ${err.message}`);
+    brainWorkers.set(brainName, worker);
+  }
+  return worker;
+}
+
+function terminateBrainWorker(brainName) {
+  const worker = brainWorkers.get(brainName);
+  if (worker) {
+    worker.terminate();
+    brainWorkers.delete(brainName);
+  }
+}
+
+function syncBrainAsync(brain) {
+  return new Promise((resolve) => {
+    const id = nextSyncId++;
+    const worker = getBrainWorker(brain.name);
+    const indexed = stmts.allFilesWithMtimeForBrain.all(brain.name).map(r => [r.path, r.mtime]);
+    pendingSyncs.set(id, { resolve });
+    grugLog(`[syncBrain] ${brain.name} — dispatched to worker (${indexed.length} indexed)`);
+    worker.postMessage({
+      id,
+      type: "sync",
+      brain: { name: brain.name, dir: brain.dir, flat: brain.flat },
+      indexed,
+    });
+  });
 }
 
 // --- timer lifecycle ---
@@ -720,7 +765,7 @@ async function refreshBrain(brain) {
       process.stderr.write(`grug: refresh skipped for ${brain.name} (ff-only failed — upstream may have rebased)\n`);
       return;
     }
-    syncBrain(brain);
+    await syncBrainAsync(brain);
     process.stderr.write(`grug: refreshed ${brain.name}\n`);
   } catch (err) {
     process.stderr.write(`grug: refresh failed for ${brain.name}: ${err.message}\n`);
@@ -767,14 +812,14 @@ function stopBrainTimers(brainName) {
   }
 }
 
-for (const brain of brains) syncBrain(brain);
-
-// Startup log: show all brains and their file counts
+// Kick off initial indexing in background worker — server starts immediately
 for (const brain of brains) {
-  const { count } = stmts.countForBrain.get(brain.name);
-  const cats = stmts.categoryCounts.all(brain.name).map(r => `${r.category}(${r.count})`).join(", ");
-  const detail = cats ? ` [${cats}]` : "";
-  process.stderr.write(`grug: brain "${brain.name}" — ${count} files${detail}\n`);
+  syncBrainAsync(brain).then(() => {
+    const { count } = stmts.countForBrain.get(brain.name);
+    const cats = stmts.categoryCounts.all(brain.name).map(r => `${r.category}(${r.count})`).join(", ");
+    const detail = cats ? ` [${cats}]` : "";
+    process.stderr.write(`grug: brain "${brain.name}" — ${count} files${detail}\n`);
+  }).catch(err => grugLog(`[syncBrain] ${brain.name} — startup error: ${err.message}`));
 }
 
 await syncGitExclude(primaryBrain);
@@ -1014,14 +1059,15 @@ server.tool(
     }
 
     const relPath = `${cat}/${t}`;
-    const linked = stmts.getLinks.all(brain.name, relPath, brain.name, relPath);
+    const rawLinks = stmts.getLinksRaw.all(brain.name, relPath, brain.name, relPath);
     let text = content;
-    if (linked.length > 0) {
-      const linkLines = linked.map(l => {
-        const other = l.path_a === relPath
-          ? `${l.name_b} [${l.cat_b}]`
-          : `${l.name_a} [${l.cat_a}]`;
-        return `- ${other}`;
+    if (rawLinks.length > 0) {
+      const linkLines = rawLinks.map(l => {
+        const isA = l.path_a === relPath && l.brain_a === brain.name;
+        const otherBrain = isA ? l.brain_b : l.brain_a;
+        const otherPath = isA ? l.path_b : l.path_a;
+        const meta = stmts.getLinkMeta.get(otherBrain, otherPath);
+        return meta ? `- ${meta.name} [${meta.category}]` : `- ${otherPath}`;
       });
       text += `\n\n---\n## linked memories\n\n${linkLines.join("\n")}`;
     }
@@ -1295,7 +1341,7 @@ server.tool(
     const results = [];
     for (const brain of targets) {
       const before = stmts.countForBrain.get(brain.name).count;
-      syncBrain(brain);
+      await syncBrainAsync(brain);
       const after = stmts.countForBrain.get(brain.name).count;
       const diff = after - before;
       const delta = diff > 0 ? ` (+${diff} new)` : diff < 0 ? ` (${diff} removed)` : "";
@@ -1341,7 +1387,7 @@ server.tool(
   async () => {
     getBrains(); // Lazy reload before accessing brains
     // Sync all brains before inspecting
-    for (const brain of brains) syncBrain(brain);
+    await Promise.all(brains.map(b => syncBrainAsync(b)));
 
     const all = collectAllMemories();
     if (all.length === 0) {
@@ -1599,6 +1645,7 @@ if (useStdio) {
   function shutdown() {
     grugLog(`[transport] stdin closed, shutting down`);
     for (const brain of brains) stopBrainTimers(brain.name);
+    for (const worker of brainWorkers.values()) worker.terminate();
     process.exit(0);
   }
   process.stdin.on("end", shutdown);
