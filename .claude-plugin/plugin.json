@@ -16,7 +16,7 @@
   ],
   "mcpServers": {
     "grug-brain": {
-      "command": "grug",
+      "command": "${HOME}/.grug-brain/bin/grug",
       "args": [
         "--stdio"
       ]

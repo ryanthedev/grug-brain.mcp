@@ -1,6 +1,6 @@
 ---
-description: Install and verify grug-brain. Checks binary, installs service, configures brains.
-allowed-tools: Bash, Read, Write
+description: Install and verify grug-brain. Builds from source, installs binary, sets up service, configures brains.
+allowed-tools: Bash, Read, Write, AskUserQuestion
 ---
 
 Run these checks in order. Fix problems as you find them. Report a summary at the end.
@@ -19,43 +19,93 @@ If the server is already running (socket exists and is connectable), this is an 
    - macOS: `launchctl bootout gui/$(id -u) ~/Library/LaunchAgents/com.grug-brain.server.plist 2>/dev/null || true`
    - Linux: `systemctl --user stop grug-brain.service 2>/dev/null || true`
 2. Wait 2 seconds for the socket to be released
-3. Re-install the service: `grug serve --install-service`
-4. Wait 2 seconds, verify socket exists again
-5. Skip to **step 6 (brains.json)**
+3. Build the new binary (step 1 below)
+4. Re-install the service: `~/.grug-brain/bin/grug serve --install-service`
+5. Wait 2 seconds, verify socket exists again
+6. Skip to **step 5 (brains.json)**
 
 **If NOT_RUNNING** — continue with full setup below.
 
-## 1. Binary check
+## 1. Rust toolchain
 
-`grug --version` must work. If it doesn't, tell the user to install:
+`cargo --version` must work. If it doesn't:
 
 ```bash
-brew install rtd/grug/grug-brain
+curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
+source "$HOME/.cargo/env"
 ```
 
 Verify after install:
 
 ```bash
-grug --version
+cargo --version
 ```
 
-## 2. Service installation
+## 2. Build from source
 
-Install grug-brain as a persistent background service. This creates and loads a launchd plist (macOS) or systemd unit (Linux).
+Build the release binary from the plugin root:
+
+```bash
+cd "${CLAUDE_PLUGIN_ROOT}"
+cargo build --release
+```
+
+This takes ~30s on first build. The binary lands at `${CLAUDE_PLUGIN_ROOT}/target/release/grug`.
+
+Install the binary to `~/.grug-brain/bin/` (a stable location that survives plugin updates):
+
+```bash
+mkdir -p ~/.grug-brain/bin
+cp "${CLAUDE_PLUGIN_ROOT}/target/release/grug" ~/.grug-brain/bin/grug
+chmod +x ~/.grug-brain/bin/grug
+```
+
+Add to PATH if not already there. Check the user's shell:
+
+```bash
+echo $SHELL
+```
+
+Then check if `~/.grug-brain/bin` is already on PATH:
+
+```bash
+echo $PATH | grep -q '.grug-brain/bin' && echo "ON_PATH" || echo "NOT_ON_PATH"
+```
+
+**If NOT_ON_PATH**, append to the shell config:
+- zsh: `echo 'export PATH="$HOME/.grug-brain/bin:$PATH"' >> ~/.zshrc`
+- bash: `echo 'export PATH="$HOME/.grug-brain/bin:$PATH"' >> ~/.bashrc`
+
+Also export for the current session:
+
+```bash
+export PATH="$HOME/.grug-brain/bin:$PATH"
+```
+
+Verify:
+
+```bash
+~/.grug-brain/bin/grug --version
+```
+
+## 3. Service installation
+
+Install grug-brain as a persistent background service.
 
 ### Kill stale processes
 
-Previous sessions may have left zombie processes. Kill them:
+Previous sessions may have left zombie processes:
 
 ```bash
 pkill -f 'grug.*serve' 2>/dev/null || true
+pkill -f 'bun.*grug-brain' 2>/dev/null || true
 sleep 1
 ```
 
 ### Install service
 
 ```bash
-grug serve --install-service
+~/.grug-brain/bin/grug serve --install-service
 ```
 
 This writes the service file and loads it. The binary handles platform detection (macOS vs Linux) automatically.
@@ -71,7 +121,7 @@ sleep 2
 - macOS: `launchctl list | grep grug`
 - Linux: `systemctl --user is-active grug-brain.service`
 
-Also check the socket file exists:
+Also check the socket:
 
 ```bash
 [[ -S ~/.grug-brain/grug.sock ]] && echo "Socket ready" || echo "Socket not found — check logs"
@@ -80,16 +130,6 @@ Also check the socket file exists:
 If the socket isn't ready, check logs:
 - macOS: `~/.grug-brain/launchd-stderr.log`
 - Linux: `journalctl --user -u grug-brain.service`
-
-## 3. Server health
-
-Test a tool call through the socket:
-
-```bash
-echo '{"id":"health","tool":"grug-search","params":{"query":"test"}}' | socat - UNIX-CONNECT:$HOME/.grug-brain/grug.sock 2>/dev/null
-```
-
-If `socat` is not available, the socket file existing and the service being listed is sufficient.
 
 ## 4. MCP registration
 
@@ -109,17 +149,16 @@ Then tell the user to restart Claude Code so the plugin re-registers.
 
 **If already showing `grug --stdio`**: no action needed.
 
-## 5. Clean up old installation
+### Clean up old bun installation
 
 If there are remnants of the old bun-based installation:
 
 ```bash
-pkill -f 'bun.*grug-brain' 2>/dev/null || true
 launchctl bootout gui/$(id -u) ~/Library/LaunchAgents/com.grug-brain.mcp.plist 2>/dev/null || true
 rm -f ~/Library/LaunchAgents/com.grug-brain.mcp.plist 2>/dev/null || true
 ```
 
-## 6. brains.json
+## 5. brains.json
 
 ```bash
 cat ~/.grug-brain/brains.json 2>/dev/null
@@ -152,7 +191,7 @@ Write the JSON array to `~/.grug-brain/brains.json`.
 
 Show current brains. Ask: "Want to add another? You can also use `grug-config` anytime."
 
-## 7. Git setup
+## 6. Git setup
 
 For each brain with a `git` field, check initialization:
 
@@ -171,7 +210,7 @@ git add -A && git commit -m "grug: initial sync" --quiet 2>/dev/null || true
 git push -u origin main 2>/dev/null || git push -u origin master 2>/dev/null || true
 ```
 
-## 8. Summary
+## 7. Summary
 
 Report:
 - grug version
