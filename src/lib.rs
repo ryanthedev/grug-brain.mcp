@@ -1,7 +1,10 @@
+pub mod client;
 pub mod config;
 pub mod db;
 pub mod helpers;
 pub mod parsing;
+pub mod protocol;
+pub mod server;
 pub mod spike;
 pub mod tools;
 pub mod types;
