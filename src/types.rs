@@ -15,6 +15,9 @@ pub struct Brain {
     /// Source URL for flat brains (e.g. "github:org/repo/path").
     /// Preserved for config round-trips but not used by the core engine.
     pub source: Option<String>,
+    /// Auto-refresh interval in seconds for read-only brains.
+    /// Only meaningful for non-writable brains with a source field.
+    pub refresh_interval: Option<u64>,
 }
 
 /// Loaded and validated brain configuration.
@@ -79,4 +82,15 @@ pub struct Memory {
     pub body: String,
     pub description: String,
     pub mtime: f64,
+}
+
+/// A recall row (subset of FtsRow used by recall/dream queries).
+#[derive(Debug, Clone)]
+pub struct RecallRow {
+    pub path: String,
+    pub brain: String,
+    pub category: String,
+    pub name: String,
+    pub date: String,
+    pub description: String,
 }

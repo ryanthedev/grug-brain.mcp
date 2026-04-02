@@ -58,7 +58,7 @@ pub fn get_categories(dir: &Path) -> Vec<String> {
             Some(s) => s.to_string(),
             None => continue,
         };
-        if name_str.starts_with('.') {
+        if name_str.starts_with('.') || name_str.starts_with('_') {
             continue;
         }
         if entry.path().is_dir() {
@@ -178,5 +178,17 @@ mod tests {
         let tmp = TempDir::new().unwrap();
         let cats = get_categories(tmp.path());
         assert!(cats.is_empty());
+    }
+
+    #[test]
+    fn test_get_categories_skips_underscored() {
+        let tmp = TempDir::new().unwrap();
+        let dir = tmp.path();
+        fs::create_dir_all(dir.join("visible")).unwrap();
+        fs::create_dir_all(dir.join("_hidden")).unwrap();
+        fs::create_dir_all(dir.join("_drafts")).unwrap();
+
+        let cats = get_categories(dir);
+        assert_eq!(cats, vec!["visible"]);
     }
 }

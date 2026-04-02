@@ -109,6 +109,10 @@ pub fn load_brains_from(config_override: Option<&Path>) -> Result<BrainConfig, S
             .and_then(|v| v.as_str())
             .map(|s| s.to_string());
 
+        let refresh_interval = entry
+            .get("refreshInterval")
+            .and_then(|v| v.as_u64());
+
         let dir = fs::canonicalize(expand_home(dir_raw))
             .unwrap_or_else(|_| expand_home(dir_raw));
 
@@ -121,6 +125,7 @@ pub fn load_brains_from(config_override: Option<&Path>) -> Result<BrainConfig, S
             git,
             sync_interval,
             source,
+            refresh_interval,
         });
     }
 
@@ -205,6 +210,7 @@ fn create_default_config(config_path: &Path) -> Result<BrainConfig, String> {
         git: None,
         sync_interval: 60,
         source: None,
+        refresh_interval: None,
     };
 
     Ok(BrainConfig {
