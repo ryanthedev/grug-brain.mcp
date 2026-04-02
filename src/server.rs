@@ -1,5 +1,6 @@
 use crate::config::{expand_home, load_brains};
 use crate::protocol::{SocketRequest, SocketResponse};
+use crate::services::BrainServices;
 use crate::tools::GrugDb;
 use crate::types::BrainConfig;
 use serde_json::Value;
@@ -10,7 +11,7 @@ use tokio::net::{UnixListener, UnixStream};
 use tokio::sync::{mpsc, oneshot};
 
 /// Message sent to the DB worker thread.
-pub(crate) struct DbRequest {
+pub struct DbRequest {
     pub(crate) tool: String,
     pub(crate) params: Value,
     pub(crate) reply: oneshot::Sender<Result<String, String>>,
@@ -306,7 +307,7 @@ pub async fn run_server(
     };
 
     // Start DB worker thread
-    let db_tx = spawn_db_thread(&db, brain_config)?;
+    let db_tx = spawn_db_thread(&db, brain_config.clone())?;
 
     // Bind Unix socket listener
     let listener = UnixListener::bind(&socket)
@@ -314,9 +315,18 @@ pub async fn run_server(
 
     eprintln!("grug serve: listening on {}", socket.display());
 
-    // Accept loop with graceful shutdown
-    let shutdown = tokio::signal::ctrl_c();
-    tokio::pin!(shutdown);
+    // Start background services (git sync timers, refresh timers, initial reindex)
+    let services = BrainServices::start(
+        &brain_config.brains,
+        brain_config.primary_brain(),
+        db_tx.clone(),
+    )
+    .await;
+
+    // Accept loop with graceful shutdown on SIGINT or SIGTERM
+    let mut sigterm =
+        tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
+            .map_err(|e| format!("grug: failed to register SIGTERM handler: {e}"))?;
 
     loop {
         tokio::select! {
@@ -331,12 +341,19 @@ pub async fn run_server(
                     }
                 }
             }
-            _ = &mut shutdown => {
-                eprintln!("grug serve: shutting down");
+            _ = tokio::signal::ctrl_c() => {
+                eprintln!("grug serve: shutting down (SIGINT)");
+                break;
+            }
+            _ = sigterm.recv() => {
+                eprintln!("grug serve: shutting down (SIGTERM)");
                 break;
             }
         }
     }
+
+    // Graceful shutdown: stop background services first
+    services.shutdown().await;
 
     // Cleanup
     drop(db_tx);
