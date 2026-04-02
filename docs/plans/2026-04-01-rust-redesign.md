@@ -1,7 +1,9 @@
 # Plan: Rust Redesign
 
 **Created:** 2026-04-01
-**Status:** ready
+**Status:** in-progress
+**Started:** 2026-04-01
+**Current Phase:** 1
 **Complexity:** complex
 
 ---
