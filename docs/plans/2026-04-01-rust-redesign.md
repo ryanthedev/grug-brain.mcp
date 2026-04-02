@@ -1,9 +1,9 @@
 # Plan: Rust Redesign
 
 **Created:** 2026-04-01
-**Status:** in-progress
+**Status:** complete
 **Started:** 2026-04-01
-**Current Phase:** 1
+**Completed:** 2026-04-01
 **Complexity:** complex
 
 ---
@@ -291,4 +291,37 @@ Server (`grug serve`) owns all state: SQLite database, git sync, file indexing, 
 
 ## Execution Log
 
-_To be filled during /code-foundations:building_
+### Phase 1: Project Scaffold + Core Types (Gate: Full)
+- [x] BUILD: Discovery + pseudocode + implementation complete
+- [x] REVIEW: Verification passed
+- [x] Committed
+Commit: 55391bd
+Summary: Rust project foundation — brain config parsing, SQLite FTS5 schema v5, frontmatter/body/description extraction, file walker, helpers. rmcp spike confirmed. 55 tests.
+
+### Phase 2: Tool Implementations (Gate: Full)
+- [x] BUILD: Discovery + pseudocode + implementation complete
+- [x] REVIEW: fail→pass (1 attempt — 3 Unicode output divergences fixed: em-dash, arrow, ellipsis)
+- [x] Committed
+Commit: 4937ecb
+Summary: All 9 MCP tools ported with full feature parity. FTS5 search, file indexing, config hot-reload, dream with cross-links/stale/quality/conflicts. 121 tests.
+
+### Phase 3: Unix Socket Server + MCP Stdio Client (Gate: Full)
+- [x] BUILD: Discovery + pseudocode + implementation complete
+- [x] REVIEW: Verification passed (dead code note: default_pid_path removed)
+- [x] Committed
+Commit: 258f18f
+Summary: Unix socket server with dedicated DB worker thread. MCP stdio bridge using rmcp tool_router/tool_handler. PID-based stale socket detection. 145 tests.
+
+### Phase 4: Git Sync + Background Services (Gate: Full)
+- [x] BUILD: Discovery + pseudocode + implementation complete
+- [x] REVIEW: Verification passed
+- [x] Committed
+Commit: 487dee7
+Summary: Full git sync ported — pull/rebase/push, conflict resolution, .grugignore, sync:false. Per-brain timers, refresh timers, graceful shutdown. 166 tests.
+
+### Phase 5: Plugin + Brew Formula + Setup (Gate: Full)
+- [x] BUILD: Discovery + pseudocode + implementation complete
+- [x] REVIEW: Verification passed
+- [x] Committed
+Commit: 5b258ca
+Summary: plugin.json → grug --stdio (v4.0.0). Homebrew formula. --install-service for launchd/systemd. Setup/README rewritten. 173 tests.
