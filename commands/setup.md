@@ -22,7 +22,7 @@ If the server is already running (socket exists and is connectable), this is an 
 3. Build the new binary (step 1 below)
 4. Re-install the service: `~/.grug-brain/bin/grug serve --install-service`
 5. Wait 2 seconds, verify socket exists again
-6. Skip to **step 5 (brains.json)**
+6. Skip to **step 6 (brains.json)**
 
 **If NOT_RUNNING** — continue with full setup below.
 
@@ -88,7 +88,42 @@ Verify:
 ~/.grug-brain/bin/grug --version
 ```
 
-## 3. Service installation
+## 3. Migrate old installation (if any)
+
+Check for and remove the old bun-based grug-brain service before installing the new one. This prevents the old service from respawning and fighting over the database.
+
+```bash
+# Check for old launchd service (macOS)
+launchctl list 2>/dev/null | grep 'com.grug-brain.mcp' && echo "OLD_SERVICE_FOUND" || echo "NO_OLD_SERVICE"
+```
+
+**If OLD_SERVICE_FOUND:**
+
+```bash
+# Stop and unload old bun service
+launchctl bootout gui/$(id -u) ~/Library/LaunchAgents/com.grug-brain.mcp.plist 2>/dev/null || true
+rm -f ~/Library/LaunchAgents/com.grug-brain.mcp.plist
+
+# Kill any lingering bun processes
+pkill -f 'bun.*grug-brain' 2>/dev/null || true
+
+# Remove old MCP registration if it points to bun or HTTP
+claude mcp remove grug-brain 2>/dev/null || true
+
+sleep 2
+```
+
+**On Linux**, check for the old systemd service:
+
+```bash
+systemctl --user is-active grug-brain.service 2>/dev/null && echo "OLD_SERVICE_FOUND" || echo "NO_OLD_SERVICE"
+```
+
+If found, stop and disable it before proceeding.
+
+Existing data is preserved — `~/.grug-brain/brains.json`, `grug.db`, and all brain directories carry over unchanged.
+
+## 4. Service installation
 
 Install grug-brain as a persistent background service.
 
@@ -98,7 +133,6 @@ Previous sessions may have left zombie processes:
 
 ```bash
 pkill -f 'grug.*serve' 2>/dev/null || true
-pkill -f 'bun.*grug-brain' 2>/dev/null || true
 sleep 1
 ```
 
@@ -131,7 +165,7 @@ If the socket isn't ready, check logs:
 - macOS: `~/.grug-brain/launchd-stderr.log`
 - Linux: `journalctl --user -u grug-brain.service`
 
-## 4. MCP registration
+## 5. MCP registration
 
 The plugin handles MCP registration automatically via `plugin.json`. Verify:
 
@@ -149,16 +183,7 @@ Then tell the user to restart Claude Code so the plugin re-registers.
 
 **If already showing `grug --stdio`**: no action needed.
 
-### Clean up old bun installation
-
-If there are remnants of the old bun-based installation:
-
-```bash
-launchctl bootout gui/$(id -u) ~/Library/LaunchAgents/com.grug-brain.mcp.plist 2>/dev/null || true
-rm -f ~/Library/LaunchAgents/com.grug-brain.mcp.plist 2>/dev/null || true
-```
-
-## 5. brains.json
+## 6. brains.json
 
 ```bash
 cat ~/.grug-brain/brains.json 2>/dev/null
@@ -191,7 +216,7 @@ Write the JSON array to `~/.grug-brain/brains.json`.
 
 Show current brains. Ask: "Want to add another? You can also use `grug-config` anytime."
 
-## 6. Git setup
+## 7. Git setup
 
 For each brain with a `git` field, check initialization:
 
@@ -210,7 +235,7 @@ git add -A && git commit -m "grug: initial sync" --quiet 2>/dev/null || true
 git push -u origin main 2>/dev/null || git push -u origin master 2>/dev/null || true
 ```
 
-## 7. Summary
+## 8. Summary
 
 Report:
 - grug version
