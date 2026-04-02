@@ -6,6 +6,7 @@ pub mod helpers;
 pub mod parsing;
 pub mod protocol;
 pub mod server;
+pub mod service_install;
 pub mod services;
 pub mod spike;
 pub mod tools;

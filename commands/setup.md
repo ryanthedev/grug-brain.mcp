@@ -1,5 +1,5 @@
 ---
-description: Install and verify grug-brain. Registers MCP server, checks dependencies, installs OS service, configures brains.
+description: Install and verify grug-brain. Checks binary, installs service, configures brains.
 allowed-tools: Bash, Read, Write
 ---
 
@@ -7,191 +7,117 @@ Run these checks in order. Fix problems as you find them. Report a summary at th
 
 ## 0. Update check
 
-If the service is already running (health check passes), this is an **update**, not a fresh install.
+If the server is already running (socket exists and is connectable), this is an **update**, not a fresh install.
 
 ```bash
-curl -sf http://localhost:${GRUG_PORT:-6483}/mcp -X POST \
-  -H "Content-Type: application/json" \
-  -d '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2024-11-05","capabilities":{},"clientInfo":{"name":"setup","version":"1.0"}}}' \
-  -o /dev/null 2>/dev/null && echo "RUNNING" || echo "NOT_RUNNING"
+[[ -S ~/.grug-brain/grug.sock ]] && echo "RUNNING" || echo "NOT_RUNNING"
 ```
 
 **If RUNNING** — skip to the fast update path:
 
-1. `bun install` in `${CLAUDE_PLUGIN_ROOT}` (pick up any new deps)
-2. Restart the service:
-   - macOS: `launchctl kickstart -k gui/$(id -u)/com.grug-brain.mcp`
-   - Linux: `systemctl --user restart grug-brain.service`
-3. Wait 2 seconds, verify health check again
-4. Skip to **step 8 (Summary)**
+1. Stop the existing service:
+   - macOS: `launchctl bootout gui/$(id -u) ~/Library/LaunchAgents/com.grug-brain.server.plist 2>/dev/null || true`
+   - Linux: `systemctl --user stop grug-brain.service 2>/dev/null || true`
+2. Wait 2 seconds for the socket to be released
+3. Re-install the service: `grug serve --install-service`
+4. Wait 2 seconds, verify socket exists again
+5. Skip to **step 6 (brains.json)**
 
 **If NOT_RUNNING** — continue with full setup below.
 
-## 1. Bun runtime
+## 1. Binary check
 
-`bun --version` must work. If it doesn't, tell the user to install Bun: `curl -fsSL https://bun.sh/install | bash`
-
-Resolve the absolute path now — you need it later:
+`grug --version` must work. If it doesn't, tell the user to install:
 
 ```bash
-BUN_PATH=$(which bun)
+brew install rtd/grug/grug-brain
 ```
 
-## 2. Dependencies
+Verify after install:
 
-`bun install` in `${CLAUDE_PLUGIN_ROOT}`.
+```bash
+grug --version
+```
 
-## 3. Service installation
+## 2. Service installation
 
-Install grug-brain as a persistent HTTP service so it survives across Claude Code sessions.
+Install grug-brain as a persistent background service. This creates and loads a launchd plist (macOS) or systemd unit (Linux).
 
 ### Kill stale processes
 
-Previous sessions may have left zombie stdio processes running (each keeps git sync and SQLite timers alive, causing contention). Kill them before installing the service:
+Previous sessions may have left zombie processes. Kill them:
 
 ```bash
-pkill -f 'bun.*grug-brain.mcp/server.js' 2>/dev/null || true
-pkill -f 'node.*grug-brain.mcp/server.js' 2>/dev/null || true
+pkill -f 'grug.*serve' 2>/dev/null || true
 sleep 1
 ```
 
-### Resolve paths
+### Install service
 
 ```bash
-BUN_PATH=$(which bun)
-SERVER_PATH="${CLAUDE_PLUGIN_ROOT}/server.js"
-GRUG_PORT=${GRUG_PORT:-6483}
+grug serve --install-service
 ```
 
-All three must be absolute paths / valid values. If `which bun` fails, stop.
+This writes the service file and loads it. The binary handles platform detection (macOS vs Linux) automatically.
 
-### macOS (launchd)
+### Verify
 
-Check: `[[ "$(uname)" == "Darwin" ]]`
+Wait 2 seconds, then check:
 
-Plist path: `~/Library/LaunchAgents/com.grug-brain.mcp.plist`
+```bash
+sleep 2
+```
 
-1. Stop any existing service:
-   ```bash
-   launchctl bootout gui/$(id -u) ~/Library/LaunchAgents/com.grug-brain.mcp.plist 2>/dev/null || true
-   ```
+- macOS: `launchctl list | grep grug`
+- Linux: `systemctl --user is-active grug-brain.service`
 
-2. Ensure `~/.grug-brain` exists:
-   ```bash
-   mkdir -p ~/.grug-brain
-   ```
+Also check the socket file exists:
 
-3. Write the plist file to `~/Library/LaunchAgents/com.grug-brain.mcp.plist`.
-   Use **Write tool** — do not use heredocs in bash.
+```bash
+[[ -S ~/.grug-brain/grug.sock ]] && echo "Socket ready" || echo "Socket not found — check logs"
+```
 
-   The plist must contain:
-   - `Label`: `com.grug-brain.mcp`
-   - `ProgramArguments`: array of `[$BUN_PATH, "run", "$SERVER_PATH"]` — use the resolved absolute paths, not variables
-   - `WorkingDirectory`: the resolved `${CLAUDE_PLUGIN_ROOT}`
-   - `KeepAlive`: true
-   - `RunAtLoad`: true
-   - `StandardOutPath`: the resolved `~/.grug-brain/launchd-stdout.log`
-   - `StandardErrorPath`: the resolved `~/.grug-brain/launchd-stderr.log`
-   - `EnvironmentVariables`: dict with `HOME` set to `$HOME` (resolved)
-   - If `GRUG_PORT` is not 6483, add `GRUG_PORT` to the environment dict too
+If the socket isn't ready, check logs:
+- macOS: `~/.grug-brain/launchd-stderr.log`
+- Linux: `journalctl --user -u grug-brain.service`
 
-4. Load the service:
-   ```bash
-   launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.grug-brain.mcp.plist
-   ```
+## 3. Server health
 
-5. Wait 2 seconds, then verify:
-   ```bash
-   curl -sf http://localhost:${GRUG_PORT}/mcp -X POST \
-     -H "Content-Type: application/json" \
-     -d '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2024-11-05","capabilities":{},"clientInfo":{"name":"setup","version":"1.0"}}}'
-   ```
-   Valid JSON with `serverInfo` means it's running. If it fails, tell the user to check `~/.grug-brain/launchd-stderr.log`.
+Test a tool call through the socket:
 
-### Linux (systemd)
+```bash
+echo '{"id":"health","tool":"grug-search","params":{"query":"test"}}' | socat - UNIX-CONNECT:$HOME/.grug-brain/grug.sock 2>/dev/null
+```
 
-Check: `[[ "$(uname)" == "Linux" ]]`
+If `socat` is not available, the socket file existing and the service being listed is sufficient.
 
-Unit path: `~/.config/systemd/user/grug-brain.service`
+## 4. MCP registration
 
-1. Ensure dirs exist:
-   ```bash
-   mkdir -p ~/.grug-brain ~/.config/systemd/user
-   ```
-
-2. Write the unit file to `~/.config/systemd/user/grug-brain.service`.
-   Use **Write tool** — do not use heredocs in bash.
-
-   Contents:
-   ```ini
-   [Unit]
-   Description=grug-brain MCP server
-   After=network.target
-
-   [Service]
-   Type=simple
-   ExecStart=$BUN_PATH run $SERVER_PATH
-   WorkingDirectory=${CLAUDE_PLUGIN_ROOT}
-   Restart=always
-   RestartSec=5
-   Environment=HOME=$HOME
-   Environment=GRUG_PORT=$GRUG_PORT
-
-   [Install]
-   WantedBy=default.target
-   ```
-
-   Use the resolved absolute paths, not variables.
-
-3. Reload and enable:
-   ```bash
-   systemctl --user daemon-reload
-   systemctl --user enable grug-brain.service
-   systemctl --user restart grug-brain.service
-   ```
-
-4. Enable linger so the service survives logout:
-   ```bash
-   loginctl enable-linger $(whoami) 2>/dev/null || true
-   ```
-
-5. Wait 2 seconds, then verify:
-   ```bash
-   systemctl --user is-active grug-brain.service
-   ```
-   If it fails, tell the user to check: `journalctl --user -u grug-brain.service`
-
-## 4. MCP server registration
+The plugin handles MCP registration automatically via `plugin.json`. Verify:
 
 ```bash
 claude mcp list 2>/dev/null | grep -i grug
 ```
 
-**If registered as stdio** (output shows a `bun` command, not an HTTP URL): remove it first:
+**If registered with old bun/HTTP reference**: remove and let the plugin re-register:
 
 ```bash
 claude mcp remove grug-brain 2>/dev/null
 ```
 
-**If not registered**, or was just removed, add as HTTP:
+Then tell the user to restart Claude Code so the plugin re-registers.
+
+**If already showing `grug --stdio`**: no action needed.
+
+## 5. Clean up old installation
+
+If there are remnants of the old bun-based installation:
 
 ```bash
-claude mcp add --transport http -s user grug-brain http://localhost:${GRUG_PORT}/mcp
+pkill -f 'bun.*grug-brain' 2>/dev/null || true
+launchctl bootout gui/$(id -u) ~/Library/LaunchAgents/com.grug-brain.mcp.plist 2>/dev/null || true
+rm -f ~/Library/LaunchAgents/com.grug-brain.mcp.plist 2>/dev/null || true
 ```
-
-**If already registered as HTTP** pointing to the right URL: no action needed.
-
-## 5. Server health
-
-```bash
-curl -sf http://localhost:${GRUG_PORT:-6483}/mcp -X POST \
-  -H "Content-Type: application/json" \
-  -d '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2024-11-05","capabilities":{},"clientInfo":{"name":"setup","version":"1.0"}}}'
-```
-
-Valid JSON with `serverInfo` means it's working. If not, check:
-- macOS: `~/.grug-brain/launchd-stderr.log`
-- Linux: `journalctl --user -u grug-brain.service`
 
 ## 6. brains.json
 
@@ -248,17 +174,15 @@ git push -u origin main 2>/dev/null || git push -u origin master 2>/dev/null || 
 ## 8. Summary
 
 Report:
-- Bun version (or missing)
-- Dependencies: installed / error
+- grug version
 - Service: installed + running / failed (with log path)
-- MCP server: registered as HTTP / needs restart
+- MCP server: registered via plugin / needs restart
 - Each brain: name, dir, file count, writable, git-synced
 - Conflict count (if any)
-- Commands: `/dream`, `/setup`, `/ingest`
 - Tools: grug-write, grug-search, grug-read, grug-recall, grug-delete, grug-config, grug-dream
 
 Service management:
-- **macOS**: restart `launchctl kickstart -k gui/$(id -u)/com.grug-brain.mcp`, stop `launchctl bootout gui/$(id -u) ~/Library/LaunchAgents/com.grug-brain.mcp.plist`, logs `~/.grug-brain/launchd-stderr.log`
+- **macOS**: restart `launchctl kickstart -k gui/$(id -u)/com.grug-brain.server`, stop `launchctl bootout gui/$(id -u) ~/Library/LaunchAgents/com.grug-brain.server.plist`, logs `~/.grug-brain/launchd-stderr.log`
 - **Linux**: restart `systemctl --user restart grug-brain.service`, stop `systemctl --user stop grug-brain.service`, logs `journalctl --user -u grug-brain.service`
 
-Tell the user to restart Claude Code if the server registration changed.
+Tell the user to restart Claude Code if the MCP server registration changed.

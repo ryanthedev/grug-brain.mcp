@@ -1,6 +1,7 @@
 use clap::{Parser, Subcommand};
 use grug_brain::client::run_stdio;
 use grug_brain::server::run_server;
+use grug_brain::service_install;
 use std::path::PathBuf;
 
 #[derive(Parser)]
@@ -21,6 +22,10 @@ enum Commands {
         /// Custom socket path (default: ~/.grug-brain/grug.sock).
         #[arg(long)]
         socket: Option<PathBuf>,
+
+        /// Install as a system service (launchd on macOS, systemd on Linux) and exit.
+        #[arg(long)]
+        install_service: bool,
     },
 }
 
@@ -37,16 +42,28 @@ async fn main() {
     }
 
     match cli.command {
-        Some(Commands::Serve { socket }) => {
+        Some(Commands::Serve {
+            socket,
+            install_service,
+        }) => {
+            if install_service {
+                if let Err(e) =
+                    service_install::install_service(socket.as_deref())
+                {
+                    eprintln!("{e}");
+                    std::process::exit(1);
+                }
+                return;
+            }
             if let Err(e) = run_server(socket, None, None).await {
                 eprintln!("{e}");
                 std::process::exit(1);
             }
         }
         None => {
-            // No command and no --stdio: print usage
-            eprintln!("Usage: grug serve    Start the grug-brain server");
-            eprintln!("       grug --stdio  Run as MCP stdio client");
+            eprintln!("Usage: grug serve                Start the grug-brain server");
+            eprintln!("       grug serve --install-service  Install as system service");
+            eprintln!("       grug --stdio              Run as MCP stdio client");
             eprintln!();
             eprintln!("Run grug --help for more info.");
             std::process::exit(1);
