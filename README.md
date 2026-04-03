@@ -5,8 +5,33 @@ Persistent memory for LLMs. Point it at any number of directories, and grug inde
 ## Install
 
 ```bash
+brew install rtd/grug/grug-brain
 claude plugin add grug-brain
 /setup
+```
+
+`/setup` installs the background service, configures your brains, and verifies everything works.
+
+## Architecture
+
+```
+Claude Code                grug serve (background service)
+    |                           |
+    v                      SQLite FTS5
+grug --stdio               Git sync
+    |                      File indexing
+    +--- unix socket ---+  Background timers
+```
+
+Two modes in one binary:
+
+- **`grug serve`** -- background server (brew service). Owns the SQLite database, runs git sync timers, indexes files. Listens on `~/.grug-brain/grug.sock`.
+- **`grug --stdio`** -- thin MCP client for Claude Code. Forwards every tool call to the running server over the Unix socket. Near-zero startup time (~1ms).
+
+The server runs as a launchd agent (macOS) or systemd user service (Linux). Install it with:
+
+```bash
+grug serve --install-service
 ```
 
 ## Brains
@@ -24,20 +49,13 @@ A brain is a directory of markdown files. You split them however you want.
   {
     "name": "hive",
     "dir": "~/.grug-brain/memories",
-    "git": "git@github.com:ryanthedev/grug-memories.git",
+    "git": "git@github.com:you/grug-memories.git",
     "writable": true,
     "syncInterval": 60
   },
   {
-    "name": "research",
-    "dir": "~/repos/grug-docs",
-    "git": "git@github.com:ryanthedev/grug-docs.git",
-    "writable": true,
-    "syncInterval": 300
-  },
-  {
-    "name": "drizzle",
-    "dir": "~/repos/drizzle-orm-docs/src/content/docs",
+    "name": "docs",
+    "dir": "~/repos/project-docs",
     "flat": true
   }
 ]
@@ -72,15 +90,15 @@ grug-write brain:"hive" category:"feedback" path:"no-mocks" content:"..."
 grug-search query:"sqlite"
 > [hive] loopback/powersync-patch-vs-upsert.md
 > [research] bun/runtime-sqlite.mdx
-> [drizzle] connect-bun-sqlite.mdx
+> [docs] connect-bun-sqlite.mdx
 ```
 
 **grug-read** lets you drill into any brain.
 
 ```
 grug-read                                    # list all brains
-grug-read brain:"research"                   # categories
-grug-read brain:"research" category:"bun"    # files
+grug-read brain:"docs"                       # categories
+grug-read brain:"docs" category:"api"        # files
 grug-read brain:"hive" category:"feedback" path:"no-mocks"  # content
 ```
 
@@ -105,6 +123,13 @@ grug-config action:"add" name:"tailwind" dir:"~/.grug-brain/tailwind" flat:true
 grug-config action:"remove" name:"tailwind"
 ```
 
+**grug-sync** triggers a git sync for one or all brains.
+
+```
+grug-sync                      # sync all brains with git remotes
+grug-sync brain:"hive"         # sync one brain
+```
+
 **grug-dream** does maintenance. Commits pending changes across writable brains, surfaces git conflicts, finds cross-links between memories, flags anything that's gone stale.
 
 ```
@@ -122,20 +147,16 @@ Dream tells you when conflicts exist. Three steps to fix one:
 2. Write the correct version to the original path
 3. Delete the conflict entry
 
-## Third-Party Docs
-
-```
-/ingest github:sveltejs/kit/documentation/docs
-```
-
-Clones the repo, copies the markdown to `~/.grug-brain/<name>/`, adds a brain entry. Add `refreshInterval` to the entry if you want grug to pull updates on a schedule.
-
 ## File Layout
 
 ```
 ~/.grug-brain/
   brains.json
   grug.db
+  grug.sock
+  grug.pid
+  launchd-stdout.log
+  launchd-stderr.log
   self/
     scratch/
       i-am-alive.md
@@ -143,6 +164,40 @@ Clones the repo, copies the markdown to `~/.grug-brain/<name>/`, adds a brain en
     feedback/
     loopback/
     conflicts/
+```
+
+## Service Management
+
+### macOS (launchd)
+
+```bash
+# Install / reinstall
+grug serve --install-service
+
+# Restart
+launchctl kickstart -k gui/$(id -u)/com.grug-brain.server
+
+# Stop
+launchctl bootout gui/$(id -u) ~/Library/LaunchAgents/com.grug-brain.server.plist
+
+# Logs
+cat ~/.grug-brain/launchd-stderr.log
+```
+
+### Linux (systemd)
+
+```bash
+# Install / reinstall
+grug serve --install-service
+
+# Restart
+systemctl --user restart grug-brain.service
+
+# Stop
+systemctl --user stop grug-brain.service
+
+# Logs
+journalctl --user -u grug-brain.service
 ```
 
 ## License

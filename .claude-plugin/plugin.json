@@ -1,6 +1,6 @@
 {
   "name": "grug-brain",
-  "version": "3.3.0",
+  "version": "4.0.0",
   "description": "Persistent memory for LLMs with search, multi-source docs, and dreaming. SQLite FTS5, markdown storage, git-tracked history.",
   "author": {
     "name": "r"
@@ -16,9 +16,8 @@
   ],
   "mcpServers": {
     "grug-brain": {
-      "command": "bun",
+      "command": "${HOME}/.grug-brain/bin/grug",
       "args": [
-        "${CLAUDE_PLUGIN_ROOT}/server.js",
         "--stdio"
       ]
     }
