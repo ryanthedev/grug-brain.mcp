@@ -307,7 +307,7 @@ impl GrugMcp {
 impl ServerHandler for GrugMcp {
     fn get_info(&self) -> ServerInfo {
         ServerInfo::default()
-            .with_server_info(Implementation::new("grug-brain", "0.1.0"))
+            .with_server_info(Implementation::new("grug-brain", env!("CARGO_PKG_VERSION")))
     }
 }
 

@@ -1,7 +1,7 @@
 class GrugBrain < Formula
   desc "Persistent memory for LLMs — FTS5 search, git sync, markdown storage"
-  homepage "https://github.com/rtd/grug-brain.mcp"
-  url "https://github.com/rtd/grug-brain.mcp/archive/refs/tags/v0.1.0.tar.gz"
+  homepage "https://github.com/ryanthedev/grug-brain.mcp"
+  url "https://github.com/ryanthedev/grug-brain.mcp/archive/refs/tags/v4.0.0.tar.gz"
   sha256 "PLACEHOLDER_SHA256"
   license "MIT"
 
