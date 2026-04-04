@@ -2,7 +2,7 @@ use crate::protocol::{SocketRequest, SocketResponse};
 use crate::server::default_socket_path;
 use rmcp::handler::server::router::tool::ToolRouter;
 use rmcp::handler::server::wrapper::Parameters;
-use rmcp::model::{Implementation, ServerInfo};
+use rmcp::model::{Implementation, ServerCapabilities, ServerInfo};
 use rmcp::{ServerHandler, tool, tool_handler, tool_router};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
@@ -306,7 +306,7 @@ impl GrugMcp {
 #[tool_handler]
 impl ServerHandler for GrugMcp {
     fn get_info(&self) -> ServerInfo {
-        ServerInfo::default()
+        ServerInfo::new(ServerCapabilities::builder().enable_tools().build())
             .with_server_info(Implementation::new("grug-brain", env!("CARGO_PKG_VERSION")))
     }
 }
