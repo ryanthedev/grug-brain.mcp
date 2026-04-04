@@ -4,28 +4,49 @@ use std::fs;
 
 /// Get up to speed. Shows 2 most recent per category,
 /// writes full listing to recall.md in the primary brain's directory.
+///
+/// When no brain is specified, shows ALL brains (not just primary).
+/// When a category is specified without a brain, searches all brains for that category.
 pub fn grug_recall(
     db: &mut GrugDb,
     category: Option<&str>,
     brain_name: Option<&str>,
 ) -> Result<String, String> {
     db.maybe_reload_config();
-    let brain = db.resolve_brain(brain_name)?.clone();
 
-    let rows = if let Some(cat) = category {
-        recall_by_category(db, &brain.name, cat)
-    } else {
-        recall_all(db, &brain.name)
+    // Collect rows: if brain specified, use that brain. Otherwise, all brains.
+    let rows = match brain_name {
+        Some(_) => {
+            let brain = db.resolve_brain(brain_name)?.clone();
+            if let Some(cat) = category {
+                recall_by_category(db, &brain.name, cat)
+            } else {
+                recall_all(db, &brain.name)
+            }
+        }
+        None => {
+            // No brain specified: search ALL brains
+            let brain_names: Vec<String> = db.config().brains.iter().map(|b| b.name.clone()).collect();
+            let mut all_rows = Vec::new();
+            for name in &brain_names {
+                if let Some(cat) = category {
+                    all_rows.extend(recall_by_category(db, name, cat));
+                } else {
+                    all_rows.extend(recall_all(db, name));
+                }
+            }
+            all_rows
+        }
     };
 
     if rows.is_empty() {
         let cat_msg = category
             .map(|c| format!(" in \"{c}\""))
             .unwrap_or_default();
-        return Ok(format!(
-            "no memories found{} in brain \"{}\"",
-            cat_msg, brain.name
-        ));
+        let brain_msg = brain_name
+            .map(|b| format!(" in brain \"{b}\""))
+            .unwrap_or_default();
+        return Ok(format!("no memories found{}{}", cat_msg, brain_msg));
     }
 
     // Group rows by category (preserving insertion order)
@@ -37,6 +58,8 @@ pub fn grug_recall(
             groups.push((row.category.clone(), vec![row]));
         }
     }
+
+    let primary_name = db.config().primary.clone();
 
     // Write full listing to recall.md in primary brain directory
     let primary_dir = db.config().primary_brain().dir.clone();
@@ -57,7 +80,7 @@ pub fn grug_recall(
     fs::write(&out_path, full_lines.join("\n"))
         .map_err(|e| format!("failed to write recall.md: {e}"))?;
 
-    // Build preview: 2 most recent per category
+    // Build preview: 2 most recent per category, with brain tags
     let mut preview = Vec::new();
     for (cat, entries) in &groups {
         preview.push(format!("# {cat}"));
@@ -67,7 +90,12 @@ pub fn grug_recall(
             } else {
                 format!(" ({})", e.date)
             };
-            preview.push(format!("- {}{}: {}", e.name, date, e.description));
+            let brain_tag = if e.brain != primary_name {
+                format!(" [{}]", e.brain)
+            } else {
+                String::new()
+            };
+            preview.push(format!("- {}{}{}: {}", e.name, brain_tag, date, e.description));
         }
         if entries.len() > 2 {
             preview.push(format!("  \u{2026} and {} more", entries.len() - 2));

@@ -223,7 +223,7 @@ impl std::fmt::Debug for SocketClient {
 impl GrugMcp {
     #[tool(
         name = "grug-search",
-        description = "Search across all brains. BM25 ranked, porter stemming."
+        description = "Search across all brains. BM25 ranked, porter stemming. Results show [category] [brain] tags — use these when calling grug-read or grug-recall."
     )]
     async fn search(&self, params: Parameters<SearchParams>) -> String {
         self.forward("grug-search", serde_json::to_value(&params.0).unwrap())
@@ -250,7 +250,7 @@ impl GrugMcp {
 
     #[tool(
         name = "grug-recall",
-        description = "Get up to speed. Shows 2 most recent per category, writes full listing to recall.md in the target brain's directory."
+        description = "Get up to speed. Shows 2 most recent per category across ALL brains. Specify brain to filter to one brain. Results show [brain] tags for non-primary entries."
     )]
     async fn recall(&self, params: Parameters<RecallParams>) -> String {
         self.forward("grug-recall", serde_json::to_value(&params.0).unwrap())
