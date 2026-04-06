@@ -4,7 +4,7 @@
 *.db-shm
 
 # Runtime files
-memories/recall.md
+memories/
 
 # Rust build artifacts
 target/
