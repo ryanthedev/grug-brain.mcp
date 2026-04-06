@@ -5,12 +5,11 @@ Persistent memory for LLMs. Point it at any number of directories, and grug inde
 ## Install
 
 ```bash
-brew install rtd/grug/grug-brain
 claude plugin add grug-brain
-/setup
+/install
 ```
 
-`/setup` installs the background service, configures your brains, and verifies everything works.
+`/install` builds from source, installs the background service, configures your brains, and verifies everything works. Run it again after plugin updates to pick up the new version.
 
 ## Architecture
 

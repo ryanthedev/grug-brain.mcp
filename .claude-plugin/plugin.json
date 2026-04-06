@@ -16,7 +16,7 @@
   ],
   "mcpServers": {
     "grug-brain": {
-      "command": "${CLAUDE_PLUGIN_ROOT}/target/release/grug",
+      "command": "${HOME}/.grug-brain/bin/grug",
       "args": [
         "--stdio"
       ]
