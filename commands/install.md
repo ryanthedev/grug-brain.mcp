@@ -1,5 +1,5 @@
 ---
-description: Install or update grug-brain. Builds from source, installs binary, sets up service.
+description: Install or update grug-brain. Downloads prebuilt binary or builds from source.
 allowed-tools: Bash, Read, Write, AskUserQuestion
 ---
 
@@ -13,35 +13,69 @@ Run these steps in order. Fix problems as you find them. Report a summary at the
 
 If UPDATE, tell the user you're upgrading to the latest version. If INSTALL, tell them you're setting up grug-brain for the first time.
 
-## 2. Rust toolchain
+## 2. Get the binary
+
+Try downloading a prebuilt binary from GitHub releases first. Fall back to building from source only if no prebuilt binary is available.
+
+### Detect platform
+
+```bash
+OS=$(uname -s | tr '[:upper:]' '[:lower:]')
+ARCH=$(uname -m)
+case "$OS-$ARCH" in
+  darwin-arm64) TARGET="aarch64-apple-darwin" ;;
+  *) TARGET="" ;;
+esac
+echo "TARGET=$TARGET"
+```
+
+If TARGET is empty, skip to **Build from source** below.
+
+### Download prebuilt binary
+
+Get the latest release tag and download:
+
+```bash
+LATEST=$(gh release list --repo ryanthedev/grug-brain.mcp --limit 1 --exclude-drafts --exclude-pre-releases --json tagName -q '.[0].tagName' 2>/dev/null)
+echo "LATEST=$LATEST"
+```
+
+If `gh` is not installed or the command fails, skip to **Build from source**.
+
+```bash
+mkdir -p ~/.grug-brain/bin
+gh release download "$LATEST" --repo ryanthedev/grug-brain.mcp --pattern "grug-${TARGET}.tar.gz" --dir /tmp 2>/dev/null && \
+  tar xzf "/tmp/grug-${TARGET}.tar.gz" -C ~/.grug-brain/bin && \
+  chmod +x ~/.grug-brain/bin/grug && \
+  echo "DOWNLOADED" || echo "DOWNLOAD_FAILED"
+```
+
+If DOWNLOADED, skip to **Check PATH**. If DOWNLOAD_FAILED, fall through to build from source.
+
+### Build from source
 
 ```bash
 cargo --version
 ```
 
-If missing:
+If cargo is missing:
 
 ```bash
 curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
 source "$HOME/.cargo/env"
 ```
 
-## 3. Build
+Build and install:
 
 ```bash
 cd "${CLAUDE_PLUGIN_ROOT}"
 cargo build --release
-```
-
-## 4. Install binary
-
-```bash
 mkdir -p ~/.grug-brain/bin
 cp "${CLAUDE_PLUGIN_ROOT}/target/release/grug" ~/.grug-brain/bin/grug
 chmod +x ~/.grug-brain/bin/grug
 ```
 
-Check PATH:
+### Check PATH
 
 ```bash
 echo $PATH | grep -q '.grug-brain/bin' && echo "ON_PATH" || echo "NOT_ON_PATH"
@@ -49,7 +83,7 @@ echo $PATH | grep -q '.grug-brain/bin' && echo "ON_PATH" || echo "NOT_ON_PATH"
 
 If NOT_ON_PATH, append to shell config (~/.zshrc or ~/.bashrc based on $SHELL) and export for the current session.
 
-## 5. Migrate old bun service (first install only)
+## 3. Migrate old bun service (first install only)
 
 Skip this section if mode is UPDATE.
 
@@ -67,7 +101,7 @@ claude mcp remove grug-brain 2>/dev/null || true
 sleep 2
 ```
 
-## 6. Install or restart service
+## 4. Install or restart service
 
 Stop existing service first (both modes — harmless if not running):
 
@@ -89,7 +123,7 @@ Verify:
 
 If socket not found, check `~/.grug-brain/launchd-stderr.log` (macOS) or `journalctl --user -u grug-brain.service` (Linux) and show the last 20 lines.
 
-## 7. Configure brains (first install only)
+## 5. Configure brains (first install only)
 
 Skip this section if mode is UPDATE.
 
@@ -111,7 +145,7 @@ Write the JSON array to `~/.grug-brain/brains.json`.
 
 Show current brains. Ask if they want to add another.
 
-## 8. Git setup (first install only)
+## 6. Git setup (first install only)
 
 Skip this section if mode is UPDATE.
 
@@ -132,10 +166,11 @@ git add -A && git commit -m "grug: initial sync" --quiet 2>/dev/null || true
 git push -u origin main 2>/dev/null || git push -u origin master 2>/dev/null || true
 ```
 
-## 9. Summary
+## 7. Summary
 
 Report:
 - Mode: fresh install or update
+- Install method: prebuilt binary or built from source
 - grug version (`~/.grug-brain/bin/grug --version`)
 - Service: running / failed (with log path)
 - Brains: name, dir, file count, writable, git-synced (list on install, skip on update)

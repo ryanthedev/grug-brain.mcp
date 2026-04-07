@@ -388,7 +388,7 @@ dependencies = [
 
 [[package]]
 name = "grug-brain"
-version = "4.0.2"
+version = "4.1.0"
 dependencies = [
  "chrono",
  "clap",
