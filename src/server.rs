@@ -164,6 +164,19 @@ fn dispatch_tool(db: &mut GrugDb, tool: &str, params: &Value) -> Result<String, 
             crate::tools::sync::grug_sync(db, brain)
         }
         "grug-dream" => crate::tools::dream::grug_dream(db),
+        "grug-update" => {
+            let category = extract_str(params, "category").ok_or("missing field: category")?;
+            let path = extract_str(params, "path").ok_or("missing field: path")?;
+            let brain = extract_str(params, "brain");
+            let edits: Vec<crate::tools::update::EditEntry> = serde_json::from_value(
+                params
+                    .get("edits")
+                    .cloned()
+                    .ok_or("missing field: edits")?,
+            )
+            .map_err(|e| format!("invalid edits: {e}"))?;
+            crate::tools::update::grug_update(db, category, path, &edits, brain)
+        }
         "grug-docs" => {
             let category = extract_str(params, "category");
             let path = extract_str(params, "path");
@@ -435,6 +448,36 @@ mod tests {
         let (mut db, _tmp) = test_db();
         let result = dispatch_tool(&mut db, "grug-docs", &json!({}));
         assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_dispatch_update() {
+        let (mut db, tmp) = test_db();
+        let brain_dir = tmp.path().join("memories");
+        crate::tools::test_helpers::create_brain_file(
+            &brain_dir,
+            "notes/target.md",
+            "original content here",
+        );
+        let result = dispatch_tool(
+            &mut db,
+            "grug-update",
+            &json!({
+                "category": "notes",
+                "path": "target",
+                "edits": [{"old": "original", "new": "modified"}]
+            }),
+        );
+        assert!(result.is_ok());
+        assert!(result.unwrap().contains("updated"));
+    }
+
+    #[test]
+    fn test_dispatch_update_missing_field() {
+        let (mut db, _tmp) = test_db();
+        let result = dispatch_tool(&mut db, "grug-update", &json!({}));
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("missing field"));
     }
 
     #[test]
