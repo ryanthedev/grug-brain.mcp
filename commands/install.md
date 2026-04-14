@@ -33,24 +33,36 @@ If TARGET is empty, skip to **Build from source** below.
 
 ### Download prebuilt binary
 
-Get the latest release tag and download:
-
-```bash
-LATEST=$(gh release list --repo ryanthedev/grug-brain.mcp --limit 1 --exclude-drafts --exclude-pre-releases --json tagName -q '.[0].tagName' 2>/dev/null)
-echo "LATEST=$LATEST"
-```
-
-If `gh` is not installed or the command fails, skip to **Build from source**.
+Try `gh` first, then fall back to `curl`:
 
 ```bash
 mkdir -p ~/.grug-brain/bin
-gh release download "$LATEST" --repo ryanthedev/grug-brain.mcp --pattern "grug-${TARGET}.tar.gz" --dir /tmp 2>/dev/null && \
-  tar xzf "/tmp/grug-${TARGET}.tar.gz" -C ~/.grug-brain/bin && \
-  chmod +x ~/.grug-brain/bin/grug && \
-  echo "DOWNLOADED" || echo "DOWNLOAD_FAILED"
+REPO="ryanthedev/grug-brain.mcp"
+TARBALL="/tmp/grug-${TARGET}.tar.gz"
+DOWNLOADED=false
+
+if command -v gh >/dev/null 2>&1; then
+  LATEST=$(gh release list --repo "$REPO" --limit 1 --exclude-drafts --exclude-pre-releases --json tagName -q '.[0].tagName' 2>/dev/null)
+  if [[ -n "$LATEST" ]]; then
+    gh release download "$LATEST" --repo "$REPO" --pattern "grug-${TARGET}.tar.gz" --dir /tmp --clobber 2>/dev/null && DOWNLOADED=true
+  fi
+fi
+
+if [[ "$DOWNLOADED" != "true" ]] && command -v curl >/dev/null 2>&1; then
+  LATEST=$(curl -fsSL "https://api.github.com/repos/$REPO/releases/latest" 2>/dev/null | grep '"tag_name"' | head -1 | sed 's/.*"tag_name"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/')
+  if [[ -n "$LATEST" ]]; then
+    curl -fsSL "https://github.com/$REPO/releases/download/$LATEST/grug-${TARGET}.tar.gz" -o "$TARBALL" 2>/dev/null && DOWNLOADED=true
+  fi
+fi
+
+if [[ "$DOWNLOADED" == "true" ]]; then
+  tar xzf "$TARBALL" -C ~/.grug-brain/bin && chmod +x ~/.grug-brain/bin/grug && rm -f "$TARBALL" && echo "DOWNLOADED" || echo "EXTRACT_FAILED"
+else
+  echo "DOWNLOAD_FAILED"
+fi
 ```
 
-If DOWNLOADED, skip to **Check PATH**. If DOWNLOAD_FAILED, fall through to build from source.
+If DOWNLOADED, skip to **step 3**. If DOWNLOAD_FAILED or EXTRACT_FAILED, fall through to build from source.
 
 ### Build from source
 
@@ -75,14 +87,6 @@ cp "${CLAUDE_PLUGIN_ROOT}/target/release/grug" ~/.grug-brain/bin/grug
 chmod +x ~/.grug-brain/bin/grug
 ```
 
-### Check PATH
-
-```bash
-echo $PATH | grep -q '.grug-brain/bin' && echo "ON_PATH" || echo "NOT_ON_PATH"
-```
-
-If NOT_ON_PATH, append to shell config (~/.zshrc or ~/.bashrc based on $SHELL) and export for the current session.
-
 ## 3. Migrate old bun service (first install only)
 
 Skip this section if mode is UPDATE.
@@ -103,14 +107,11 @@ sleep 2
 
 ## 4. Install or restart service
 
-Stop existing service first (both modes — harmless if not running):
-
-- macOS: `launchctl bootout gui/$(id -u) ~/Library/LaunchAgents/com.grug-brain.server.plist 2>/dev/null || true`
-- Linux: `systemctl --user stop grug-brain.service 2>/dev/null || true`
+Kill stale processes and install/reinstall the service:
 
 ```bash
-pkill -f 'grug.*serve' 2>/dev/null || true
-sleep 2
+pkill -f 'grug serve' 2>/dev/null || true
+sleep 1
 ~/.grug-brain/bin/grug serve --install-service
 sleep 2
 ```
@@ -123,29 +124,44 @@ Verify:
 
 If socket not found, check `~/.grug-brain/launchd-stderr.log` (macOS) or `journalctl --user -u grug-brain.service` (Linux) and show the last 20 lines.
 
-## 5. Configure brains (first install only)
+## 5. Verify MCP
+
+The plugin registers the MCP server automatically via `plugin.json`. Verify the binary version and that the background service socket exists:
+
+```bash
+~/.grug-brain/bin/grug --version
+[[ -S ~/.grug-brain/grug.sock ]] && echo "MCP ready" || echo "MCP not ready"
+```
+
+If MCP not ready, the background service isn't running — revisit step 4.
+
+## 6. Configure brains
 
 Skip this section if mode is UPDATE.
+
+The server creates a default `brains.json` on first start. Check what was created:
 
 ```bash
 cat ~/.grug-brain/brains.json 2>/dev/null
 ```
 
-### No config file
+Show the current brains to the user. Ask if they want to customize:
 
-Create interactively:
+1. Ask: "Want a shared brain that syncs across machines?" — name "hive", needs git remote URL, dir `~/.grug-brain/memories`, writable, syncInterval 60.
+2. Ask: "Any other brains? Docs repos, reference material?" — get name, dir, flat or not.
 
-1. **self brain** (primary, local-only): dir `~/.grug-brain/self`, primary, no git.
-2. Ask: "Want a shared brain that syncs across machines?" — name "hive", needs git remote URL, dir `~/.grug-brain/memories`, writable, syncInterval 60.
-3. Ask: "Any other brains? Docs repos, reference material?" — get name, dir, flat or not.
+Example brains.json:
 
-Write the JSON array to `~/.grug-brain/brains.json`.
+```json
+[
+  {"name": "self", "dir": "~/.grug-brain/self", "primary": true, "writable": true},
+  {"name": "hive", "dir": "~/.grug-brain/memories", "writable": true, "git": "git@github.com:user/brain.git", "syncInterval": 60}
+]
+```
 
-### Config file exists
+Write updates to `~/.grug-brain/brains.json` if the user made changes.
 
-Show current brains. Ask if they want to add another.
-
-## 6. Git setup (first install only)
+## 7. Git setup (first install only)
 
 Skip this section if mode is UPDATE.
 
@@ -166,11 +182,12 @@ git add -A && git commit -m "grug: initial sync" --quiet 2>/dev/null || true
 git push -u origin main 2>/dev/null || git push -u origin master 2>/dev/null || true
 ```
 
-## 7. Summary
+## 8. Summary
 
 Report:
 - Mode: fresh install or update
 - Install method: prebuilt binary or built from source
 - grug version (`~/.grug-brain/bin/grug --version`)
 - Service: running / failed (with log path)
+- MCP: ready / not ready
 - Brains: name, dir, file count, writable, git-synced (list on install, skip on update)
