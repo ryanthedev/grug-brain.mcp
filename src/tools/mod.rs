@@ -7,6 +7,7 @@ pub mod read;
 pub mod recall;
 pub mod search;
 pub mod sync;
+pub mod update;
 pub mod write;
 
 use crate::config::load_brains_from;

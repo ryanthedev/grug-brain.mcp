@@ -65,6 +65,26 @@ pub struct DeleteParams {
 }
 
 #[derive(Debug, Deserialize, Serialize, JsonSchema)]
+pub struct EditEntry {
+    /// Exact text to find.
+    pub old: String,
+    /// Replacement text.
+    pub new: String,
+}
+
+#[derive(Debug, Deserialize, Serialize, JsonSchema)]
+pub struct UpdateParams {
+    /// Category the memory is in.
+    pub category: String,
+    /// Filename to update.
+    pub path: String,
+    /// List of edits to apply sequentially. Each edit replaces the first occurrence of `old` with `new`.
+    pub edits: Vec<EditEntry>,
+    /// Brain to update in (defaults to primary brain).
+    pub brain: Option<String>,
+}
+
+#[derive(Debug, Deserialize, Serialize, JsonSchema)]
 pub struct ConfigParams {
     /// Config action to perform.
     pub action: String,
@@ -263,6 +283,15 @@ impl GrugMcp {
     )]
     async fn delete(&self, params: Parameters<DeleteParams>) -> String {
         self.forward("grug-delete", serde_json::to_value(&params.0).unwrap())
+            .await
+    }
+
+    #[tool(
+        name = "grug-update",
+        description = "Edit a memory in place. Applies substring find-and-replace edits sequentially. All edits are validated before writing — if any old string is not found, no changes are made."
+    )]
+    async fn update(&self, params: Parameters<UpdateParams>) -> String {
+        self.forward("grug-update", serde_json::to_value(&params.0).unwrap())
             .await
     }
 
