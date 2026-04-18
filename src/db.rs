@@ -1,11 +1,11 @@
 use rusqlite::{Connection, Result as SqlResult};
 use std::path::Path;
 
-pub const SCHEMA_VERSION: i32 = 5;
+pub const SCHEMA_VERSION: i32 = 6;
 
 /// Initialize the grug database at the given path.
 /// Creates all tables if they don't exist.
-/// If schema version < 5, drops and recreates (matching JS behavior).
+/// If schema version < current, drops and recreates all tables.
 pub fn init_db(db_path: &Path) -> SqlResult<Connection> {
     let conn = Connection::open(db_path)?;
 
@@ -34,7 +34,11 @@ pub fn init_db(db_path: &Path) -> SqlResult<Connection> {
             "DROP TABLE IF EXISTS files;
              DROP TABLE IF EXISTS brain_fts;
              DROP TABLE IF EXISTS memories_fts;
-             DROP TABLE IF EXISTS docs_fts;",
+             DROP TABLE IF EXISTS docs_fts;
+             DROP TABLE IF EXISTS term_weights;
+             DROP TABLE IF EXISTS doc_norms;
+             DROP TABLE IF EXISTS dream_log;
+             DROP TABLE IF EXISTS cross_links;",
         )?;
         conn.execute(
             "INSERT OR REPLACE INTO meta (key, value) VALUES ('schema_version', ?1)",
@@ -71,6 +75,22 @@ pub fn init_db(db_path: &Path) -> SqlResult<Connection> {
             score REAL NOT NULL,
             created_at TEXT NOT NULL,
             PRIMARY KEY (brain_a, path_a, brain_b, path_b)
+        );
+
+        CREATE TABLE IF NOT EXISTS term_weights (
+            brain TEXT NOT NULL,
+            path TEXT NOT NULL,
+            term TEXT NOT NULL,
+            weight REAL NOT NULL,
+            PRIMARY KEY (brain, path, term)
+        );
+        CREATE INDEX IF NOT EXISTS idx_term_weights_term ON term_weights (term);
+
+        CREATE TABLE IF NOT EXISTS doc_norms (
+            brain TEXT NOT NULL,
+            path TEXT NOT NULL,
+            norm REAL NOT NULL,
+            PRIMARY KEY (brain, path)
         );",
     )?;
 
@@ -87,7 +107,7 @@ mod tests {
         let tmp = NamedTempFile::new().unwrap();
         let conn = init_db(tmp.path()).unwrap();
 
-        // Verify meta table has schema_version = 5
+        // Verify meta table has schema_version = 6
         let version: String = conn
             .query_row(
                 "SELECT value FROM meta WHERE key = 'schema_version'",
@@ -95,7 +115,7 @@ mod tests {
                 |row| row.get(0),
             )
             .unwrap();
-        assert_eq!(version, "5");
+        assert_eq!(version, "6");
 
         // Verify files table works
         conn.execute(
@@ -171,7 +191,7 @@ mod tests {
         // Re-init should drop and recreate
         let conn = init_db(tmp.path()).unwrap();
 
-        // Schema version should be 5 now
+        // Schema version should be 6 now
         let version: String = conn
             .query_row(
                 "SELECT value FROM meta WHERE key = 'schema_version'",
@@ -179,7 +199,7 @@ mod tests {
                 |row| row.get(0),
             )
             .unwrap();
-        assert_eq!(version, "5");
+        assert_eq!(version, "6");
 
         // Old data should be gone (table was dropped and recreated)
         let count: i32 = conn
@@ -240,6 +260,149 @@ mod tests {
             )
             .unwrap();
         assert!(snippet.contains(">>>"), "highlight markers should be present: {snippet}");
+    }
+
+    #[test]
+    fn test_dw_1_1_term_weights_table_exists() {
+        let tmp = NamedTempFile::new().unwrap();
+        let conn = init_db(tmp.path()).unwrap();
+
+        // Verify term_weights table works with correct schema
+        conn.execute(
+            "INSERT INTO term_weights (brain, path, term, weight) VALUES ('test', '/a.md', 'rust', 0.95)",
+            [],
+        )
+        .unwrap();
+
+        let count: i32 = conn
+            .query_row("SELECT COUNT(*) FROM term_weights", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(count, 1);
+
+        // Verify primary key constraint (brain, path, term)
+        let dup = conn.execute(
+            "INSERT INTO term_weights (brain, path, term, weight) VALUES ('test', '/a.md', 'rust', 0.5)",
+            [],
+        );
+        assert!(dup.is_err(), "duplicate PK should fail");
+
+        // Verify term index exists by querying on term
+        let weight: f64 = conn
+            .query_row(
+                "SELECT weight FROM term_weights WHERE term = 'rust'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert!((weight - 0.95).abs() < 0.001);
+    }
+
+    #[test]
+    fn test_dw_1_1_doc_norms_table_exists() {
+        let tmp = NamedTempFile::new().unwrap();
+        let conn = init_db(tmp.path()).unwrap();
+
+        // Verify doc_norms table works with correct schema
+        conn.execute(
+            "INSERT INTO doc_norms (brain, path, norm) VALUES ('test', '/a.md', 1.5)",
+            [],
+        )
+        .unwrap();
+
+        let norm: f64 = conn
+            .query_row(
+                "SELECT norm FROM doc_norms WHERE brain = 'test' AND path = '/a.md'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert!((norm - 1.5).abs() < 0.001);
+
+        // Verify primary key constraint (brain, path)
+        let dup = conn.execute(
+            "INSERT INTO doc_norms (brain, path, norm) VALUES ('test', '/a.md', 2.0)",
+            [],
+        );
+        assert!(dup.is_err(), "duplicate PK should fail");
+    }
+
+    #[test]
+    fn test_dw_1_2_migration_drops_all_tables() {
+        let tmp = NamedTempFile::new().unwrap();
+
+        // Create a database with old schema version and populate tables
+        {
+            let conn = Connection::open(tmp.path()).unwrap();
+            conn.execute(
+                "CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT)",
+                [],
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO meta (key, value) VALUES ('schema_version', '5')",
+                [],
+            )
+            .unwrap();
+            // Create tables that should be dropped on migration
+            conn.execute_batch(
+                "CREATE TABLE files (brain TEXT, path TEXT);
+                 CREATE TABLE dream_log (brain TEXT, path TEXT);
+                 CREATE TABLE cross_links (brain_a TEXT, path_a TEXT, brain_b TEXT, path_b TEXT, score REAL, created_at TEXT);
+                 CREATE TABLE term_weights (brain TEXT, path TEXT, term TEXT, weight REAL);
+                 CREATE TABLE doc_norms (brain TEXT, path TEXT, norm REAL);",
+            )
+            .unwrap();
+            conn.execute("INSERT INTO dream_log VALUES ('test', '/a.md')", [])
+                .unwrap();
+            conn.execute(
+                "INSERT INTO cross_links VALUES ('a', '/a.md', 'b', '/b.md', 0.5, '2025-01-01')",
+                [],
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO term_weights VALUES ('test', '/a.md', 'rust', 0.9)",
+                [],
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO doc_norms VALUES ('test', '/a.md', 1.5)",
+                [],
+            )
+            .unwrap();
+        }
+
+        // Re-init should drop ALL tables including dream_log, cross_links, term_weights, doc_norms
+        let conn = init_db(tmp.path()).unwrap();
+
+        let version: String = conn
+            .query_row(
+                "SELECT value FROM meta WHERE key = 'schema_version'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(version, "6");
+
+        // All old data should be gone
+        let dream_count: i32 = conn
+            .query_row("SELECT COUNT(*) FROM dream_log", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(dream_count, 0, "dream_log should be empty after migration");
+
+        let cross_count: i32 = conn
+            .query_row("SELECT COUNT(*) FROM cross_links", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(cross_count, 0, "cross_links should be empty after migration");
+
+        let tw_count: i32 = conn
+            .query_row("SELECT COUNT(*) FROM term_weights", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(tw_count, 0, "term_weights should be empty after migration");
+
+        let dn_count: i32 = conn
+            .query_row("SELECT COUNT(*) FROM doc_norms", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(dn_count, 0, "doc_norms should be empty after migration");
     }
 
     #[test]
