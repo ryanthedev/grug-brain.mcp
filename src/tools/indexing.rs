@@ -1,4 +1,5 @@
 use crate::parsing::{extract_body, extract_description, extract_frontmatter};
+use crate::tools::tfidf;
 use crate::types::Brain;
 use crate::walker::{get_categories, walk_files};
 use rusqlite::Connection;
@@ -67,10 +68,13 @@ pub fn index_file(
     )
     .map_err(|e| format!("upsert file: {e}"))?;
 
+    // Compute and store TF-IDF term weights for this document
+    tfidf::compute_and_store_weights(conn, brain_name, rel_path)?;
+
     Ok(())
 }
 
-/// Remove a file from all database tables (FTS, files, dream_log, cross_links).
+/// Remove a file from all database tables (FTS, files, dream_log, cross_links, term_weights, doc_norms).
 pub fn remove_file(conn: &Connection, brain_name: &str, rel_path: &str) -> Result<(), String> {
     conn.execute(
         "DELETE FROM brain_fts WHERE brain = ?1 AND path = ?2",
@@ -95,6 +99,8 @@ pub fn remove_file(conn: &Connection, brain_name: &str, rel_path: &str) -> Resul
         rusqlite::params![brain_name, rel_path],
     )
     .map_err(|e| format!("delete cross_links: {e}"))?;
+
+    tfidf::remove_weights(conn, brain_name, rel_path)?;
 
     Ok(())
 }
@@ -340,6 +346,196 @@ mod tests {
         assert_eq!(on_disk2, 2);
         assert_eq!(indexed2, 0);
         assert_eq!(removed2, 0);
+    }
+
+    #[test]
+    fn test_dw_1_3_index_file_populates_term_weights() {
+        let (db, tmp) = test_db();
+        let brain_dir = tmp.path().join("memories");
+
+        // Need multiple docs so IDF filtering doesn't exclude everything.
+        // The last file indexed gets accurate weights since all docs are in the corpus.
+        let f1 = create_brain_file(
+            &brain_dir,
+            "notes/rust.md",
+            "---\nname: rust-guide\n---\n\nRust programming language for systems development.",
+        );
+        let f2 = create_brain_file(
+            &brain_dir,
+            "notes/python.md",
+            "---\nname: python-guide\n---\n\nPython scripting language for web applications.",
+        );
+        let f3 = create_brain_file(
+            &brain_dir,
+            "ref/go.md",
+            "---\nname: go-guide\n---\n\nGo programming language for services and networking.",
+        );
+
+        index_file(db.conn(), "memories", "notes/rust.md", &f1, "notes").unwrap();
+        index_file(db.conn(), "memories", "notes/python.md", &f2, "notes").unwrap();
+        index_file(db.conn(), "memories", "ref/go.md", &f3, "ref").unwrap();
+
+        // The last file indexed should have term_weights (accurate DF with full corpus)
+        let count: i32 = db
+            .conn()
+            .query_row(
+                "SELECT COUNT(*) FROM term_weights WHERE brain = 'memories' AND path = 'ref/go.md'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert!(count > 0, "index_file should populate term_weights");
+
+        // And doc_norms
+        let norm: f64 = db
+            .conn()
+            .query_row(
+                "SELECT norm FROM doc_norms WHERE brain = 'memories' AND path = 'ref/go.md'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert!(norm > 0.0, "index_file should populate doc_norms");
+    }
+
+    #[test]
+    fn test_dw_1_4_remove_file_cleans_term_weights() {
+        let (db, tmp) = test_db();
+        let brain_dir = tmp.path().join("memories");
+
+        // Index the doomed file LAST so it gets accurate weights with full corpus
+        let f1 = create_brain_file(
+            &brain_dir,
+            "notes/keeper.md",
+            "---\nname: keeper\n---\n\nDifferent content about gardening and botany.",
+        );
+        let f2 = create_brain_file(
+            &brain_dir,
+            "ref/other.md",
+            "---\nname: other\n---\n\nAnother unrelated document about cooking recipes.",
+        );
+        let f3 = create_brain_file(
+            &brain_dir,
+            "notes/doomed.md",
+            "---\nname: doomed\n---\n\nUnique specialized content about algorithms and sorting.",
+        );
+
+        index_file(db.conn(), "memories", "notes/keeper.md", &f1, "notes").unwrap();
+        index_file(db.conn(), "memories", "ref/other.md", &f2, "ref").unwrap();
+        index_file(db.conn(), "memories", "notes/doomed.md", &f3, "notes").unwrap();
+
+        // Verify weights exist for the last-indexed file
+        let before: i32 = db
+            .conn()
+            .query_row(
+                "SELECT COUNT(*) FROM term_weights WHERE brain = 'memories' AND path = 'notes/doomed.md'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert!(before > 0, "doomed file should have term_weights");
+
+        // Remove should clean term_weights and doc_norms
+        remove_file(db.conn(), "memories", "notes/doomed.md").unwrap();
+
+        let tw_after: i32 = db
+            .conn()
+            .query_row(
+                "SELECT COUNT(*) FROM term_weights WHERE brain = 'memories' AND path = 'notes/doomed.md'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(tw_after, 0, "term_weights should be cleaned on remove");
+
+        let dn_after: i32 = db
+            .conn()
+            .query_row(
+                "SELECT COUNT(*) FROM doc_norms WHERE brain = 'memories' AND path = 'notes/doomed.md'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(dn_after, 0, "doc_norms should be cleaned on remove");
+    }
+
+    #[test]
+    fn test_dw_1_5_sync_handles_term_weights() {
+        let (db, tmp) = test_db();
+        let brain_dir = tmp.path().join("memories");
+
+        // Create files with highly distinct content so IDF filtering keeps terms
+        // even when indexed incrementally during sync
+        create_brain_file(
+            &brain_dir,
+            "notes/a.md",
+            "---\nname: alpha\n---\n\nAlgorithms sorting mergesort quicksort heapsort.",
+        );
+        create_brain_file(
+            &brain_dir,
+            "notes/b.md",
+            "---\nname: beta\n---\n\nGardening botany photosynthesis chlorophyll plants.",
+        );
+        create_brain_file(
+            &brain_dir,
+            "ref/c.md",
+            "---\nname: gamma\n---\n\nCooking baking fermentation sourdough recipes.",
+        );
+
+        let brain = db.config().primary_brain().clone();
+        let (on_disk, indexed, _removed) = sync_brain(db.conn(), &brain).unwrap();
+        assert_eq!(on_disk, 3);
+        assert_eq!(indexed, 3);
+
+        // At least some files should have term_weights (later-indexed files get
+        // accurate DF ratios; the first file indexed when corpus=1 may have all
+        // terms filtered since DF ratio = 1/1 = 100% > 50%)
+        let tw_count: i32 = db
+            .conn()
+            .query_row(
+                "SELECT COUNT(DISTINCT path) FROM term_weights WHERE brain = 'memories'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert!(tw_count >= 2, "sync should populate term_weights for most files, got {tw_count}");
+
+        // doc_norms should be populated for files that have weights
+        let dn_count: i32 = db
+            .conn()
+            .query_row(
+                "SELECT COUNT(*) FROM doc_norms WHERE brain = 'memories'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert!(dn_count >= 2, "sync should populate doc_norms, got {dn_count}");
+
+        // Delete a file from disk and re-sync
+        std::fs::remove_file(brain_dir.join("ref/c.md")).unwrap();
+        let (_on_disk2, _indexed2, removed2) = sync_brain(db.conn(), &brain).unwrap();
+        assert_eq!(removed2, 1);
+
+        // Deleted file's term_weights and doc_norms should be gone
+        let tw_after: i32 = db
+            .conn()
+            .query_row(
+                "SELECT COUNT(*) FROM term_weights WHERE brain = 'memories' AND path = 'ref/c.md'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(tw_after, 0, "sync should clean term_weights for removed files");
+
+        let dn_after: i32 = db
+            .conn()
+            .query_row(
+                "SELECT COUNT(*) FROM doc_norms WHERE brain = 'memories' AND path = 'ref/c.md'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(dn_after, 0, "sync should clean doc_norms for removed files");
     }
 
     #[test]

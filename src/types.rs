@@ -94,3 +94,13 @@ pub struct RecallRow {
     pub date: String,
     pub description: String,
 }
+
+/// A document similar to a query document, with cosine similarity score.
+#[derive(Debug, Clone)]
+pub struct SimilarDoc {
+    pub brain: String,
+    pub path: String,
+    pub category: String,
+    pub name: String,
+    pub score: f64,
+}

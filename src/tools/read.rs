@@ -280,7 +280,7 @@ fn get_cross_links(db: &GrugDb, brain_name: &str, rel_path: &str) -> Vec<String>
         "SELECT brain_a, path_a, brain_b, path_b, score
          FROM cross_links
          WHERE (brain_a = ?1 AND path_a = ?2) OR (brain_b = ?1 AND path_b = ?2)
-         ORDER BY score
+         ORDER BY score DESC
          LIMIT 10",
     ) {
         Ok(s) => s,

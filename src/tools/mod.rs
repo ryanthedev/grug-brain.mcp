@@ -6,7 +6,9 @@ pub mod indexing;
 pub mod read;
 pub mod recall;
 pub mod search;
+pub mod similarity;
 pub mod sync;
+pub mod tfidf;
 pub mod update;
 pub mod write;
 
