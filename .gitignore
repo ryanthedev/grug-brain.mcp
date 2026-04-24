@@ -9,5 +9,6 @@ memories/
 # Rust build artifacts
 target/
 
-# Ingested docs (managed via brains.json, not committed)
-docs/
+# Working docs (not committed)
+docs/building/
+docs/plans/
