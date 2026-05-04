@@ -1,4 +1,19 @@
+use regex::Regex;
 use std::collections::HashMap;
+use std::sync::LazyLock;
+
+/// Match `[[target]]` where `target` may contain spaces, slashes, hyphens, or
+/// other readable characters. We deliberately reject `]` and newlines in the
+/// target. `[\[\[` and `\]\]` are escaped for clarity.
+static LINK_RE: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"\[\[([^\]\n]+?)\]\]").expect("link regex"));
+
+/// Match `#tag` where the tag chars are alphanumeric, `-`, `_`, or `/`. We
+/// require the `#` to be at the start of the slice or preceded by whitespace
+/// or one of `(`, `[`, `{`, `>`, `,`. The "previous-char" check happens in
+/// `parse_tags`, not in the regex.
+static TAG_BODY_RE: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"#([A-Za-z0-9][A-Za-z0-9_\-/]*)").expect("tag regex"));
 
 /// Extract YAML-like frontmatter from markdown content.
 /// Matches JS: /^---\n([\s\S]*?)\n---/
@@ -81,6 +96,105 @@ pub fn extract_description(content: &str) -> String {
         return cleaned[..end].to_string();
     }
     String::new()
+}
+
+/// Strip inline-code spans (single-backtick) from a line so their contents
+/// don't get scanned for links/tags. We do not handle nested backticks; this
+/// is a heuristic that matches GitHub-flavored markdown well enough for
+/// memory bodies.
+fn strip_inline_code(line: &str) -> String {
+    let mut out = String::with_capacity(line.len());
+    let mut chars = line.chars().peekable();
+    while let Some(c) = chars.next() {
+        if c == '`' {
+            // consume until next backtick or end
+            for c2 in chars.by_ref() {
+                if c2 == '`' {
+                    break;
+                }
+            }
+            // replace removed span with a single space so adjacent words don't merge
+            out.push(' ');
+        } else {
+            out.push(c);
+        }
+    }
+    out
+}
+
+/// Iterate the body line-by-line, yielding only lines that are NOT inside a
+/// fenced code block (``` ... ```). Frontmatter is already stripped via
+/// `extract_body` upstream.
+fn body_lines_outside_code(body: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut in_fence = false;
+    for line in body.split('\n') {
+        let trimmed = line.trim_start();
+        if trimmed.starts_with("```") || trimmed.starts_with("~~~") {
+            in_fence = !in_fence;
+            continue;
+        }
+        if !in_fence {
+            out.push(strip_inline_code(line));
+        }
+    }
+    out
+}
+
+/// Parse `[[wikilinks]]` from a memory's full content. Frontmatter, fenced
+/// code blocks, and inline `code` spans are excluded. Returns the raw target
+/// strings in order of appearance, deduplicated by exact match.
+pub fn parse_links(content: &str) -> Vec<String> {
+    let body = extract_body(content);
+    let mut seen = std::collections::HashSet::new();
+    let mut out = Vec::new();
+    for line in body_lines_outside_code(&body) {
+        for cap in LINK_RE.captures_iter(&line) {
+            if let Some(m) = cap.get(1) {
+                let target = m.as_str().trim().to_string();
+                if !target.is_empty() && seen.insert(target.clone()) {
+                    out.push(target);
+                }
+            }
+        }
+    }
+    out
+}
+
+/// Parse `#tags` from a memory's full content. Frontmatter, fenced code,
+/// inline code, and tags inside URL fragments are excluded. Returns deduped
+/// tag strings (without the `#`).
+pub fn parse_tags(content: &str) -> Vec<String> {
+    let body = extract_body(content);
+    let mut seen = std::collections::HashSet::new();
+    let mut out = Vec::new();
+    for line in body_lines_outside_code(&body) {
+        // Find each `#word` and inspect the preceding char on the original line.
+        for m in TAG_BODY_RE.find_iter(&line) {
+            let start = m.start();
+            // Preceding char check: the `#` must be at start-of-line OR
+            // preceded by whitespace or one of a small set of opening
+            // punctuation. This rejects URL fragments like `example.com#x`
+            // and inline tokens like `foo#bar`.
+            let prev_ok = if start == 0 {
+                true
+            } else {
+                let prev = line[..start].chars().next_back().unwrap_or(' ');
+                prev.is_whitespace()
+                    || matches!(prev, '(' | '[' | '{' | '>' | ',')
+            };
+            if !prev_ok {
+                continue;
+            }
+            // Capture group 1 is the tag without the `#`.
+            let tag_with_hash = m.as_str();
+            let tag = &tag_with_hash[1..]; // strip leading '#'
+            if seen.insert(tag.to_string()) {
+                out.push(tag.to_string());
+            }
+        }
+    }
+    out
 }
 
 #[cfg(test)]
@@ -186,5 +300,103 @@ mod tests {
     fn test_extract_description_only_headers() {
         let input = "---\n---\n# Header 1\n## Header 2";
         assert_eq!(extract_description(input), "");
+    }
+
+    // ----- DW-2.1: parse_links -----
+
+    #[test]
+    fn test_dw_2_1_parse_links_basic() {
+        let input = "Body has [[Alpha]] and [[Beta]] references.";
+        assert_eq!(parse_links(input), vec!["Alpha", "Beta"]);
+    }
+
+    #[test]
+    fn test_dw_2_1_parse_links_with_slash_and_spaces() {
+        let input = "See [[notes/My File]] and [[refs/another item]]";
+        assert_eq!(
+            parse_links(input),
+            vec!["notes/My File", "refs/another item"]
+        );
+    }
+
+    #[test]
+    fn test_dw_2_1_parse_links_dedupes() {
+        let input = "[[A]] then [[A]] again and [[B]]";
+        assert_eq!(parse_links(input), vec!["A", "B"]);
+    }
+
+    #[test]
+    fn test_dw_2_1_parse_links_in_fenced_code_ignored() {
+        let input = "Real [[Real]]\n```\nfake [[Fake]]\n```\nMore [[Other]]";
+        let got = parse_links(input);
+        assert!(got.contains(&"Real".to_string()));
+        assert!(got.contains(&"Other".to_string()));
+        assert!(!got.contains(&"Fake".to_string()), "got {got:?}");
+    }
+
+    #[test]
+    fn test_dw_2_1_parse_links_in_inline_code_ignored() {
+        let input = "Real [[Real]] but inline `[[Fake]]` should be skipped.";
+        let got = parse_links(input);
+        assert_eq!(got, vec!["Real"]);
+    }
+
+    #[test]
+    fn test_dw_2_1_parse_links_in_frontmatter_ignored() {
+        let input = "---\nname: test\nseed: [[NotALink]]\n---\nReal [[Body]]";
+        let got = parse_links(input);
+        assert_eq!(got, vec!["Body"]);
+    }
+
+    #[test]
+    fn test_dw_2_1_parse_links_empty_target_skipped() {
+        let input = "Empty [[]] should not produce a link, but [[X]] should.";
+        let got = parse_links(input);
+        assert_eq!(got, vec!["X"]);
+    }
+
+    // ----- DW-2.2: parse_tags -----
+
+    #[test]
+    fn test_dw_2_2_parse_tags_basic() {
+        let input = "I like #rust and #systems-programming.";
+        let got = parse_tags(input);
+        assert_eq!(got, vec!["rust", "systems-programming"]);
+    }
+
+    #[test]
+    fn test_dw_2_2_parse_tags_allowed_chars() {
+        let input = "tags: #foo_bar #ns/sub #a-b-c #123abc";
+        let got = parse_tags(input);
+        assert_eq!(got, vec!["foo_bar", "ns/sub", "a-b-c", "123abc"]);
+    }
+
+    #[test]
+    fn test_dw_2_2_parse_tags_in_code_ignored() {
+        let input = "Real #real\n```\nfake #fake\n```\nInline `#also-fake` here.";
+        let got = parse_tags(input);
+        assert!(got.contains(&"real".to_string()));
+        assert!(!got.contains(&"fake".to_string()));
+        assert!(!got.contains(&"also-fake".to_string()));
+    }
+
+    #[test]
+    fn test_dw_2_2_parse_tags_in_url_ignored() {
+        let input = "See https://example.com#section for details, and #real-tag.";
+        let got = parse_tags(input);
+        assert_eq!(got, vec!["real-tag"]);
+    }
+
+    #[test]
+    fn test_dw_2_2_parse_tags_in_frontmatter_ignored() {
+        let input = "---\nname: test\nseed: #notatag\n---\nBody #realtag";
+        let got = parse_tags(input);
+        assert_eq!(got, vec!["realtag"]);
+    }
+
+    #[test]
+    fn test_dw_2_2_parse_tags_dedupes() {
+        let input = "#a #b #a #c";
+        assert_eq!(parse_tags(input), vec!["a", "b", "c"]);
     }
 }

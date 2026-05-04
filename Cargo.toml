@@ -11,6 +11,7 @@ path = "src/main.rs"
 chrono = "0.4"
 clap = { version = "4", features = ["derive"] }
 hostname = "0.4"
+notify = "7"
 regex = "1"
 rmcp = { version = "1", features = ["transport-io", "server", "client"] }
 rusqlite = { version = "0.35", features = ["bundled"] }

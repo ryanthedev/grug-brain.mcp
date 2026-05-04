@@ -1,6 +1,6 @@
 use super::GrugDb;
 use crate::helpers::{slugify, today, validate_memory_path};
-use crate::tools::indexing::index_file;
+use crate::tools::indexing::{index_file, remove_file};
 use serde_json::json;
 use std::fs;
 use std::io::Write as _;
@@ -120,6 +120,97 @@ fn atomic_write(target: &Path, bytes: &[u8]) -> std::io::Result<()> {
     tmp.flush()?;
     tmp.persist(target).map_err(|e| e.error)?;
     Ok(())
+}
+
+/// Rename a memory: move file on disk, re-index under new path, and rewrite
+/// any incoming wikilinks that previously resolved to the old path so they
+/// now resolve to the new one.
+///
+/// Both paths are validated. The serialization order locks the
+/// lexicographically smaller `(brain, rel_path)` first to avoid deadlock if
+/// two parallel renames cross over the same pair.
+pub fn grug_rename(
+    db: &mut GrugDb,
+    old_category: &str,
+    old_path_name: &str,
+    new_category: &str,
+    new_path_name: &str,
+    brain_name: Option<&str>,
+) -> Result<String, String> {
+    db.maybe_reload_config();
+    let brain = db.resolve_brain(brain_name)?.clone();
+    if !brain.writable {
+        return Ok(format!("brain \"{}\" is read-only", brain.name));
+    }
+
+    validate_memory_path(old_category)?;
+    validate_memory_path(old_path_name)?;
+    validate_memory_path(new_category)?;
+    validate_memory_path(new_path_name)?;
+
+    let old_cat = slugify(old_category);
+    let old_slug = slugify(old_path_name);
+    let new_cat = slugify(new_category);
+    let new_slug = slugify(new_path_name);
+    if old_cat.is_empty() || old_slug.is_empty() || new_cat.is_empty() || new_slug.is_empty() {
+        return Err("category or path slugifies to empty".to_string());
+    }
+
+    let old_rel = format!("{old_cat}/{old_slug}.md");
+    let new_rel = format!("{new_cat}/{new_slug}.md");
+    if old_rel == new_rel {
+        return Ok(format!("rename no-op: {old_rel}"));
+    }
+
+    let old_full = brain.dir.join(&old_cat).join(format!("{old_slug}.md"));
+    let new_full = brain.dir.join(&new_cat).join(format!("{new_slug}.md"));
+    if !old_full.exists() {
+        return Err(format!("source not found: {old_rel}"));
+    }
+    if new_full.exists() {
+        return Err(format!("destination already exists: {new_rel}"));
+    }
+
+    // Lock both paths in deterministic order to avoid deadlock with parallel
+    // renames. We serialize lock acquisition: smaller key first, then the
+    // other.
+    let key_a = (brain.name.clone(), old_rel.clone());
+    let key_b = (brain.name.clone(), new_rel.clone());
+    let (first, second) = if key_a < key_b {
+        (key_a.clone(), key_b.clone())
+    } else {
+        (key_b.clone(), key_a.clone())
+    };
+    let lock_first = db.path_locks().for_path(&first.0, &first.1);
+    let lock_second = db.path_locks().for_path(&second.0, &second.1);
+    let _g1 = lock_first.lock().expect("path lock poisoned");
+    let _g2 = lock_second.lock().expect("path lock poisoned");
+
+    if let Some(parent) = new_full.parent() {
+        fs::create_dir_all(parent)
+            .map_err(|e| format!("failed to create parent: {e}"))?;
+    }
+    fs::rename(&old_full, &new_full)
+        .map_err(|e| format!("failed to rename: {e}"))?;
+
+    // Re-index: remove old row set, then index the new row set.
+    remove_file(db.conn(), &brain.name, &old_rel)?;
+    index_file(db.conn(), &brain.name, &new_rel, &new_full, &new_cat)?;
+
+    // Rewrite incoming links: any link that previously resolved to the old
+    // path should now resolve to the new one. We update target_path AND
+    // target_brain (idempotent since target_brain is already this brain).
+    db.conn()
+        .execute(
+            "UPDATE links SET target_path = ?1 WHERE target_brain = ?2 AND target_path = ?3",
+            rusqlite::params![&new_rel, &brain.name, &old_rel],
+        )
+        .map_err(|e| format!("update incoming links: {e}"))?;
+
+    db.enqueue_git_commit(&brain.name, &old_rel, "delete");
+    db.enqueue_git_commit(&brain.name, &new_rel, "write");
+
+    Ok(format!("renamed {old_rel} -> {new_rel}"))
 }
 
 /// Reject content that looks like an unresolved git merge conflict.
@@ -446,4 +537,77 @@ mod tests {
     }
 
     use std::sync::Arc;
+
+    // ----- DW-2.5: rename updates incoming links -----
+
+    #[test]
+    fn test_dw_2_5_rename_updates_incoming_links() {
+        let (mut db, _tmp) = test_db();
+
+        // Create target B then source A linking to B by name
+        grug_write(
+            &mut db,
+            "notes",
+            "target",
+            "---\nname: target-b\ntype: note\n---\n\nTarget body.",
+            None,
+            None,
+        )
+        .unwrap();
+        grug_write(
+            &mut db,
+            "notes",
+            "source",
+            "---\nname: source\ntype: note\n---\n\nLinks to [[target-b]].",
+            None,
+            None,
+        )
+        .unwrap();
+
+        // Pre-rename: A's link should resolve to notes/target.md
+        let pre: String = db
+            .conn()
+            .query_row(
+                "SELECT target_path FROM links WHERE brain = 'memories' AND src_path = 'notes/source.md'",
+                [], |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(pre, "notes/target.md");
+
+        // Rename target to a different category/slug
+        grug_rename(&mut db, "notes", "target", "refs", "renamed-target", None).unwrap();
+
+        // Post-rename: incoming link's target_path should be updated
+        let post: String = db
+            .conn()
+            .query_row(
+                "SELECT target_path FROM links WHERE brain = 'memories' AND src_path = 'notes/source.md'",
+                [], |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(post, "refs/renamed-target.md");
+    }
+
+    #[test]
+    fn test_dw_2_5_rename_moves_file_and_emits_commits() {
+        let (mut db, tmp, mut rx) = test_db_with_git();
+        grug_write(&mut db, "notes", "old", "body", None, None).unwrap();
+        // Drain initial write commit
+        let _ = rx.try_recv();
+
+        grug_rename(&mut db, "notes", "old", "notes", "new-name", None).unwrap();
+
+        let old = tmp.path().join("memories/notes/old.md");
+        let new = tmp.path().join("memories/notes/new-name.md");
+        assert!(!old.exists(), "old path must not exist after rename");
+        assert!(new.exists(), "new path must exist after rename");
+
+        // Two commit requests should have been emitted: delete old + write new
+        let mut got = Vec::new();
+        while let Ok(req) = rx.try_recv() {
+            got.push((req.rel_path, req.action));
+        }
+        assert!(got.iter().any(|(p, a)| p == "notes/old.md" && a == "delete"));
+        assert!(got.iter().any(|(p, a)| p == "notes/new-name.md" && a == "write"));
+    }
 }

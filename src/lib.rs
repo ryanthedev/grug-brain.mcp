@@ -12,3 +12,4 @@ pub mod spike;
 pub mod tools;
 pub mod types;
 pub mod walker;
+pub mod watcher;
