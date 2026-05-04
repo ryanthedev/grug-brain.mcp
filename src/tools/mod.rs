@@ -16,8 +16,49 @@ use crate::config::load_brains_from;
 use crate::db::init_db;
 use crate::types::{Brain, BrainConfig};
 use rusqlite::Connection;
+use std::collections::HashMap;
 use std::fs;
 use std::path::Path;
+use std::sync::{Arc, Mutex};
+use tokio::sync::mpsc;
+
+/// A request the DB worker emits asking the async layer to commit a single file
+/// to git. Fire-and-forget: failures are logged by the receiver, never returned
+/// to the user.
+#[derive(Debug, Clone)]
+pub struct GitCommitRequest {
+    pub brain: String,
+    pub rel_path: String,
+    /// Commit-message verb: "write" or "delete".
+    pub action: String,
+}
+
+/// Per-(brain, path) mutex map. Serializes the read-mtime / check-conflict /
+/// write / index sequence within a single tool call so it composes with future
+/// parallel write paths (HTTP layer in plan-1 phase 3).
+///
+/// The DB worker is single-threaded today, so this is forward-looking insurance
+/// rather than a current correctness fix. Cheap when uncontended.
+#[derive(Default)]
+pub struct PathLocks {
+    inner: Mutex<HashMap<(String, String), Arc<Mutex<()>>>>,
+}
+
+impl PathLocks {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Get (or create) the lock for a (brain, path). Outer map lock is held only
+    /// for the insertion; the returned `Arc<Mutex<()>>` is what callers hold
+    /// across the critical section.
+    pub fn for_path(&self, brain: &str, path: &str) -> Arc<Mutex<()>> {
+        let mut g = self.inner.lock().expect("PathLocks map mutex poisoned");
+        g.entry((brain.to_string(), path.to_string()))
+            .or_insert_with(|| Arc::new(Mutex::new(())))
+            .clone()
+    }
+}
 
 pub const SEARCH_PAGE_SIZE: usize = 20;
 pub const BROWSE_PAGE_SIZE: usize = 100;
@@ -28,13 +69,49 @@ pub const STALE_DAYS: i64 = 90;
 pub struct GrugDb {
     conn: Connection,
     config: BrainConfig,
+    /// Per-(brain, path) write serialization. See `PathLocks`.
+    path_locks: Arc<PathLocks>,
+    /// Optional channel emitting `GitCommitRequest` after every successful
+    /// write/delete. `None` in unit tests by default; the server wires up a
+    /// real receiver in `run_server`.
+    git_tx: Option<mpsc::Sender<GitCommitRequest>>,
 }
 
 impl GrugDb {
     /// Open (or create) the grug database and load brain config.
     pub fn open(db_path: &Path, config: BrainConfig) -> Result<Self, String> {
         let conn = init_db(db_path).map_err(|e| format!("failed to open database: {e}"))?;
-        Ok(Self { conn, config })
+        Ok(Self {
+            conn,
+            config,
+            path_locks: Arc::new(PathLocks::new()),
+            git_tx: None,
+        })
+    }
+
+    /// Install the channel that downstream git-commit work flows through.
+    /// Called once by `run_server` after spawning the receiver task.
+    pub fn set_git_tx(&mut self, tx: mpsc::Sender<GitCommitRequest>) {
+        self.git_tx = Some(tx);
+    }
+
+    pub fn path_locks(&self) -> Arc<PathLocks> {
+        self.path_locks.clone()
+    }
+
+    /// Try to enqueue a git-commit request. Best-effort: if the channel is full
+    /// or absent (tests), this is a no-op. The user-facing reply does not depend
+    /// on it.
+    pub fn enqueue_git_commit(&self, brain: &str, rel_path: &str, action: &str) {
+        if let Some(tx) = &self.git_tx {
+            let req = GitCommitRequest {
+                brain: brain.to_string(),
+                rel_path: rel_path.to_string(),
+                action: action.to_string(),
+            };
+            // try_send: never block the DB worker
+            let _ = tx.try_send(req);
+        }
     }
 
     pub fn conn(&self) -> &Connection {
@@ -95,6 +172,15 @@ pub mod test_helpers {
     use crate::types::Brain;
     use std::path::PathBuf;
     use tempfile::TempDir;
+
+    /// Create a GrugDb backed by a temp directory and an open git-commit
+    /// channel. Returns the receiver so tests can assert on emitted requests.
+    pub fn test_db_with_git() -> (GrugDb, TempDir, mpsc::Receiver<GitCommitRequest>) {
+        let (mut db, tmp) = test_db();
+        let (tx, rx) = mpsc::channel::<GitCommitRequest>(16);
+        db.set_git_tx(tx);
+        (db, tmp, rx)
+    }
 
     /// Create a GrugDb backed by a temp directory with a single primary brain.
     pub fn test_db() -> (GrugDb, TempDir) {

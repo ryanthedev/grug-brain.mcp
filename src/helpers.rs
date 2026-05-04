@@ -4,6 +4,52 @@ use std::sync::LazyLock;
 static SLUGIFY_RE: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"[^a-z0-9]+").expect("slugify regex"));
 
+/// Validate that a memory `category` or `path` argument is safe.
+///
+/// Rejects:
+/// - empty strings
+/// - null bytes
+/// - absolute paths (leading `/`)
+/// - parent traversal (`..` component) and `.` component
+/// - shell metacharacters and control characters
+///
+/// This runs *before* `slugify` so that the original user input cannot escape
+/// the brain directory or smuggle metacharacters into downstream tools (git,
+/// shell expansion, log lines). After validation the value is still slugified
+/// for filesystem use.
+pub fn validate_memory_path(s: &str) -> Result<(), String> {
+    if s.is_empty() {
+        return Err("path is empty".to_string());
+    }
+    if s.contains('\0') {
+        return Err("path contains null byte".to_string());
+    }
+    if s.starts_with('/') {
+        return Err("absolute paths are not allowed".to_string());
+    }
+    for component in s.split('/') {
+        if component == ".." {
+            return Err("parent traversal (..) is not allowed".to_string());
+        }
+        if component == "." {
+            return Err("current-dir reference (.) is not allowed".to_string());
+        }
+    }
+    // Shell metacharacters and control whitespace -- never legal in a path token,
+    // even before slugification, because raw values appear in error messages and
+    // command logs.
+    const FORBIDDEN: &[char] = &[
+        ';', '|', '&', '$', '`', '<', '>', '*', '?', '!', '(', ')', '{', '}',
+        '[', ']', '\\', '\n', '\r', '\t',
+    ];
+    for c in s.chars() {
+        if FORBIDDEN.contains(&c) {
+            return Err(format!("path contains forbidden character: {c:?}"));
+        }
+    }
+    Ok(())
+}
+
 /// Convert text to a URL-safe slug.
 /// Matches JS: toLowerCase, replace non-alnum with "-", trim dashes, truncate to 80.
 pub fn slugify(text: &str) -> String {
@@ -90,6 +136,61 @@ mod tests {
     fn test_paginate_short() {
         let text = "line1\nline2\nline3";
         assert_eq!(paginate(text, 1), text);
+    }
+
+    #[test]
+    fn test_dw_1_4_validate_memory_path_accepts_normal() {
+        assert!(validate_memory_path("notes").is_ok());
+        assert!(validate_memory_path("notes/sub").is_ok());
+        assert!(validate_memory_path("My Notes").is_ok());
+        assert!(validate_memory_path("a-b_c.d").is_ok());
+    }
+
+    #[test]
+    fn test_dw_1_4_validate_memory_path_rejects_empty() {
+        assert!(validate_memory_path("").is_err());
+    }
+
+    #[test]
+    fn test_dw_1_4_validate_memory_path_rejects_null_byte() {
+        assert!(validate_memory_path("notes\0bad").is_err());
+    }
+
+    #[test]
+    fn test_dw_1_4_validate_memory_path_rejects_absolute() {
+        assert!(validate_memory_path("/etc/passwd").is_err());
+    }
+
+    #[test]
+    fn test_dw_1_4_validate_memory_path_rejects_parent_traversal() {
+        assert!(validate_memory_path("..").is_err());
+        assert!(validate_memory_path("../escape").is_err());
+        assert!(validate_memory_path("notes/../escape").is_err());
+        assert!(validate_memory_path("notes/..").is_err());
+    }
+
+    #[test]
+    fn test_dw_1_4_validate_memory_path_rejects_dot_component() {
+        assert!(validate_memory_path(".").is_err());
+        assert!(validate_memory_path("notes/./x").is_err());
+    }
+
+    #[test]
+    fn test_dw_1_4_validate_memory_path_rejects_shell_metachars() {
+        for c in [';', '|', '&', '$', '`', '<', '>', '*', '?', '!', '(', ')', '{', '}', '[', ']', '\\'] {
+            let s = format!("bad{c}name");
+            assert!(
+                validate_memory_path(&s).is_err(),
+                "expected rejection for {c:?} in {s:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_dw_1_4_validate_memory_path_rejects_control_whitespace() {
+        assert!(validate_memory_path("a\nb").is_err());
+        assert!(validate_memory_path("a\rb").is_err());
+        assert!(validate_memory_path("a\tb").is_err());
     }
 
     #[test]

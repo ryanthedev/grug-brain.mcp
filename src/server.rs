@@ -1,7 +1,8 @@
 use crate::config::{expand_home, load_brains};
+use crate::git::{build_sync_locks, git_commit_file};
 use crate::protocol::{SocketRequest, SocketResponse};
 use crate::services::BrainServices;
-use crate::tools::GrugDb;
+use crate::tools::{GitCommitRequest, GrugDb};
 use crate::types::BrainConfig;
 use serde_json::Value;
 use std::fs;
@@ -115,7 +116,8 @@ fn dispatch_tool(db: &mut GrugDb, tool: &str, params: &Value) -> Result<String, 
             let path = extract_str(params, "path").ok_or("missing field: path")?;
             let content = extract_str(params, "content").ok_or("missing field: content")?;
             let brain = extract_str(params, "brain");
-            crate::tools::write::grug_write(db, category, path, content, brain)
+            let if_match_mtime = params.get("if_match_mtime").and_then(|v| v.as_f64());
+            crate::tools::write::grug_write(db, category, path, content, brain, if_match_mtime)
         }
         "grug-read" => {
             let brain = extract_str(params, "brain");
@@ -132,7 +134,8 @@ fn dispatch_tool(db: &mut GrugDb, tool: &str, params: &Value) -> Result<String, 
             let category = extract_str(params, "category").ok_or("missing field: category")?;
             let path = extract_str(params, "path").ok_or("missing field: path")?;
             let brain = extract_str(params, "brain");
-            crate::tools::delete::grug_delete(db, category, path, brain)
+            let hard = extract_bool(params, "hard").unwrap_or(false);
+            crate::tools::delete::grug_delete(db, category, path, brain, hard)
         }
         "grug-config" => {
             let action = extract_str(params, "action").ok_or("missing field: action")?;
@@ -192,6 +195,7 @@ fn dispatch_tool(db: &mut GrugDb, tool: &str, params: &Value) -> Result<String, 
 fn spawn_db_thread(
     db_path: &Path,
     config: BrainConfig,
+    git_tx: Option<mpsc::Sender<GitCommitRequest>>,
 ) -> Result<mpsc::Sender<DbRequest>, String> {
     let db_path = db_path.to_path_buf();
     let (tx, mut rx) = mpsc::channel::<DbRequest>(64);
@@ -206,6 +210,9 @@ fn spawn_db_thread(
                     return;
                 }
             };
+            if let Some(tx) = git_tx {
+                db.set_git_tx(tx);
+            }
 
             // Block on the receiver using a simple loop.
             // We use blocking_recv since this is a dedicated std::thread.
@@ -319,8 +326,30 @@ pub async fn run_server(
         None => load_brains()?,
     };
 
+    // Channel: DB worker -> async git committer.
+    // Capacity sized so a burst of writes doesn't block the DB worker; if the
+    // channel ever fills (which would mean git is hung), the DB worker drops
+    // commit requests rather than blocking user-facing writes.
+    let (git_commit_tx, mut git_commit_rx) = mpsc::channel::<GitCommitRequest>(256);
+
     // Start DB worker thread
-    let db_tx = spawn_db_thread(&db, brain_config.clone())?;
+    let db_tx = spawn_db_thread(&db, brain_config.clone(), Some(git_commit_tx))?;
+
+    // Spawn async git-commit consumer. Holds its own copy of the brain list
+    // and the per-brain SyncLocks so it can call `git_commit_file` for the
+    // right brain on each request.
+    let commit_brains = brain_config.brains.clone();
+    let commit_locks = build_sync_locks(&commit_brains);
+    tokio::spawn(async move {
+        while let Some(req) = git_commit_rx.recv().await {
+            let brain = commit_brains.iter().find(|b| b.name == req.brain).cloned();
+            let Some(brain) = brain else {
+                eprintln!("grug: commit request for unknown brain {}", req.brain);
+                continue;
+            };
+            git_commit_file(&brain, &req.rel_path, &req.action, &commit_locks).await;
+        }
+    });
 
     // Bind Unix socket listener
     let listener = UnixListener::bind(&socket)

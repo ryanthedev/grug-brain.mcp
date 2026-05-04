@@ -100,6 +100,24 @@ pub fn remove_file(conn: &Connection, brain_name: &str, rel_path: &str) -> Resul
     )
     .map_err(|e| format!("delete cross_links: {e}"))?;
 
+    // Clear wikilinks where this file is either source or resolved target.
+    conn.execute(
+        "DELETE FROM links WHERE brain = ?1 AND src_path = ?2",
+        rusqlite::params![brain_name, rel_path],
+    )
+    .map_err(|e| format!("delete links (src): {e}"))?;
+    conn.execute(
+        "DELETE FROM links WHERE target_brain = ?1 AND target_path = ?2",
+        rusqlite::params![brain_name, rel_path],
+    )
+    .map_err(|e| format!("delete links (target): {e}"))?;
+
+    conn.execute(
+        "DELETE FROM tags WHERE brain = ?1 AND path = ?2",
+        rusqlite::params![brain_name, rel_path],
+    )
+    .map_err(|e| format!("delete tags: {e}"))?;
+
     tfidf::remove_weights(conn, brain_name, rel_path)?;
 
     Ok(())
