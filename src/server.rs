@@ -186,6 +186,38 @@ fn dispatch_tool(db: &mut GrugDb, tool: &str, params: &Value) -> Result<String, 
             let page = extract_u64(params, "page").map(|p| p as usize);
             crate::tools::docs::grug_docs(db, category, path, page)
         }
+        // HTTP read-only endpoints. These return JSON strings rather than the
+        // formatted text shown to MCP clients, but they share the same
+        // single-writer worker thread (preserving the dispatch_tool invariant).
+        // See `crate::http::handlers` for the matching axum routes.
+        "__http/brains" => crate::http::handlers::brains_json(db),
+        "__http/memories" => {
+            let brain = extract_str(params, "brain");
+            crate::http::handlers::memories_json(db, brain)
+        }
+        "__http/memory" => {
+            let brain = extract_str(params, "brain").ok_or("missing field: brain")?;
+            let category = extract_str(params, "category").ok_or("missing field: category")?;
+            let path = extract_str(params, "path").ok_or("missing field: path")?;
+            crate::http::handlers::memory_json(db, brain, category, path)
+        }
+        "__http/graph" => {
+            let brain = extract_str(params, "brain");
+            let mode = extract_str(params, "mode");
+            let node = extract_str(params, "node");
+            let depth = extract_u64(params, "depth").map(|d| d as usize);
+            crate::http::handlers::graph_json(db, brain, mode, node, depth)
+        }
+        "__http/search" => {
+            let q = extract_str(params, "q").unwrap_or("");
+            let brain = extract_str(params, "brain");
+            crate::http::handlers::search_json(db, q, brain)
+        }
+        "__http/quickswitch" => {
+            let q = extract_str(params, "q").unwrap_or("");
+            crate::http::handlers::quickswitch_json(db, q)
+        }
+        "__http/healthz" => crate::http::handlers::healthz_json(db),
         _ => Err(format!("unknown tool: {tool}")),
     }
 }
@@ -304,6 +336,31 @@ pub async fn run_server(
     db_path: Option<PathBuf>,
     config: Option<BrainConfig>,
 ) -> Result<(), String> {
+    run_server_with_shutdown(socket_path, db_path, config, None).await
+}
+
+/// Same as `run_server` but accepts a programmatic shutdown signal alongside
+/// the SIGINT/SIGTERM handlers. Either source will trigger graceful
+/// shutdown — useful for integration tests that need to verify the full
+/// shutdown path without raising real process-wide signals (which would
+/// affect every test running in the same binary).
+pub async fn run_server_with_shutdown(
+    socket_path: Option<PathBuf>,
+    db_path: Option<PathBuf>,
+    config: Option<BrainConfig>,
+    mut external_shutdown: Option<oneshot::Receiver<()>>,
+) -> Result<(), String> {
+    // Install a global tracing subscriber so the HTTP TraceLayer (and any
+    // other `tracing` events) actually emit. `try_init` is intentional —
+    // tests may install their own subscriber first; we don't want to panic.
+    let _ = tracing_subscriber::fmt()
+        .with_env_filter(
+            tracing_subscriber::EnvFilter::try_from_default_env()
+                .unwrap_or_else(|_| "info,tower_http=info".into()),
+        )
+        .with_writer(std::io::stderr)
+        .try_init();
+
     let socket = socket_path.unwrap_or_else(default_socket_path);
     let db = db_path.unwrap_or_else(default_db_path);
 
@@ -365,12 +422,61 @@ pub async fn run_server(
     )
     .await;
 
+    // Start HTTP server alongside the socket. Failure to bind is non-fatal
+    // for the socket transport.
+    let http_port = crate::http::configured_port();
+    let http_state = crate::http::AppState {
+        db_tx: db_tx.clone(),
+        events: services.events_sender(),
+    };
+    let port_file = crate::http::default_port_file();
+    let (http_shutdown_tx, http_shutdown_rx) =
+        tokio::sync::oneshot::channel::<()>();
+    let http_handle: Option<tokio::task::JoinHandle<()>> =
+        match crate::http::bind_listener(http_port).await {
+            Ok((listener, bound)) => {
+                crate::http::write_port_file(&port_file, bound);
+                eprintln!(
+                    "grug serve: http listening on http://127.0.0.1:{bound}"
+                );
+                Some(tokio::spawn(async move {
+                    if let Err(e) = crate::http::run_http(
+                        listener,
+                        http_state,
+                        http_shutdown_rx,
+                    )
+                    .await
+                    {
+                        eprintln!("grug: http server error: {e}");
+                    }
+                }))
+            }
+            Err(e) => {
+                eprintln!("grug: http server disabled: {e}");
+                None
+            }
+        };
+
     // Accept loop with graceful shutdown on SIGINT or SIGTERM
     let mut sigterm =
         tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
             .map_err(|e| format!("grug: failed to register SIGTERM handler: {e}"))?;
 
+    // Helper: a future that resolves when the external shutdown channel
+    // fires, or stays pending forever if no channel was provided. We use a
+    // sentinel `Option::take` so the receiver is consumed exactly once.
     loop {
+        // Build a shutdown future for this iteration. If no external channel
+        // was passed, this future is `pending()` and the select arm is dead.
+        let external_fut = async {
+            match external_shutdown.as_mut() {
+                Some(rx) => {
+                    let _ = rx.await;
+                }
+                None => std::future::pending::<()>().await,
+            }
+        };
+
         tokio::select! {
             accept_result = listener.accept() => {
                 match accept_result {
@@ -391,10 +497,24 @@ pub async fn run_server(
                 eprintln!("grug serve: shutting down (SIGTERM)");
                 break;
             }
+            _ = external_fut => {
+                eprintln!("grug serve: shutting down (external)");
+                break;
+            }
         }
     }
 
-    // Graceful shutdown: stop background services first
+    // Graceful shutdown: tell HTTP server to stop, then background services.
+    let _ = http_shutdown_tx.send(());
+    if let Some(handle) = http_handle {
+        let _ = tokio::time::timeout(
+            std::time::Duration::from_secs(15),
+            handle,
+        )
+        .await;
+    }
+    crate::http::remove_port_file(&port_file);
+
     services.shutdown().await;
 
     // Cleanup

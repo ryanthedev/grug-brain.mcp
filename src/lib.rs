@@ -3,6 +3,7 @@ pub mod config;
 pub mod db;
 pub mod git;
 pub mod helpers;
+pub mod http;
 pub mod parsing;
 pub mod protocol;
 pub mod server;

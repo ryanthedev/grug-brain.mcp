@@ -3,7 +3,8 @@ use crate::git::{
     SyncLocks,
 };
 use crate::server::DbRequest;
-use crate::types::Brain;
+use crate::types::{Brain, MemoryEvent};
+use crate::watcher::Watcher;
 use serde_json::json;
 use std::time::Duration;
 use tokio::sync::{broadcast, mpsc, oneshot};
@@ -22,6 +23,18 @@ pub struct BrainServices {
     /// Sender used to broadcast shutdown. When dropped, all receivers get a RecvError,
     /// which we use as the shutdown signal.
     _shutdown_tx: broadcast::Sender<()>,
+    /// Filesystem watcher (kept alive via field). HTTP SSE consumers obtain
+    /// receivers via `events_sender()`.
+    watcher: Option<Watcher>,
+}
+
+impl BrainServices {
+    /// Clone the broadcast sender for `MemoryEvent`s. HTTP handlers call
+    /// `subscribe()` on the result to attach a fresh receiver per client.
+    /// Returns `None` if the watcher failed to start.
+    pub fn events_sender(&self) -> Option<broadcast::Sender<MemoryEvent>> {
+        self.watcher.as_ref().map(|w| w.sender())
+    }
 }
 
 impl BrainServices {
@@ -111,9 +124,20 @@ impl BrainServices {
             });
         }
 
+        // Start filesystem watcher across all brains. Failures are non-fatal:
+        // HTTP SSE simply has no producer if this errors. Logged for ops.
+        let watcher = match Watcher::start(brains) {
+            Ok(w) => Some(w),
+            Err(e) => {
+                eprintln!("grug: watcher disabled: {e}");
+                None
+            }
+        };
+
         BrainServices {
             tasks,
             _shutdown_tx,
+            watcher,
         }
     }
 

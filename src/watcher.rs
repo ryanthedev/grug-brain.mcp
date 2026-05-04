@@ -115,6 +115,13 @@ impl Watcher {
         self.tx.subscribe()
     }
 
+    /// Clone the underlying broadcast sender. HTTP SSE handlers use this to
+    /// hand a fresh `Receiver` to each connected client without holding a
+    /// reference to the watcher itself.
+    pub fn sender(&self) -> broadcast::Sender<MemoryEvent> {
+        self.tx.clone()
+    }
+
     /// Register a self-write so the next watcher event matching
     /// `(brain, rel_path, mtime_ms)` is dropped. Mtime mismatch passes
     /// through (the file changed for a different reason).
@@ -142,11 +149,12 @@ struct RawEvent {
 enum RawKind {
     CreateOrModify,
     Remove,
-    /// A rename event from notify. notify gives us paired From/To events,
-    /// but RecommendedWatcher on macOS fires them as separate Modify events,
-    /// so for now we treat rename as Create+Remove on the two paths and
-    /// rely on the debouncer to de-dupe.
-    Rename,
+    // `notify` on macOS folds rename events into `Modify(Name(_))` for both
+    // endpoints, which `classify_event` already maps to `CreateOrModify`. The
+    // separate Rename variant added in Phase 2 was unreachable in practice and
+    // emitted duplicated `from`/`to` strings, so it has been removed. If we
+    // ever need true rename correlation, route it through a different path
+    // (e.g. `grug_rename`'s explicit suppression) rather than the watcher.
 }
 
 /// Classify a notify event into zero or more `RawEvent`s, attributing each
@@ -269,11 +277,10 @@ fn spawn_debouncer(
 }
 
 fn merge_kinds(prev: RawKind, next: RawKind) -> RawKind {
-    // Remove dominates everything; Rename dominates CreateOrModify.
+    // Remove dominates Create-or-Modify within a single debounce window.
     use RawKind::*;
     match (prev, next) {
         (Remove, _) | (_, Remove) => Remove,
-        (Rename, _) | (_, Rename) => Rename,
         _ => CreateOrModify,
     }
 }
@@ -312,7 +319,7 @@ fn flush_event(
     let mtime_ms = file_mtime_ms(&pe.full_path);
 
     // sync:false filter (read content; small enough cost given debounce).
-    if matches!(pe.kind, RawKind::CreateOrModify | RawKind::Rename) {
+    if matches!(pe.kind, RawKind::CreateOrModify) {
         let content = std::fs::read_to_string(&pe.full_path).ok();
         if is_local_file(&entry.dir, rel_path, content.as_deref()) {
             return;
@@ -356,12 +363,6 @@ fn flush_event(
         RawKind::Remove => MemoryEvent::Deleted {
             brain: brain.to_string(),
             path: rel_path.to_string(),
-        },
-        RawKind::Rename => MemoryEvent::Renamed {
-            brain: brain.to_string(),
-            from: rel_path.to_string(),
-            to: rel_path.to_string(),
-            mtime: mtime_ms,
         },
     };
     let _ = tx.send(evt);
