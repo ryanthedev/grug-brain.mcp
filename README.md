@@ -11,6 +11,12 @@ claude plugin add grug-brain
 
 `/install` builds from source, installs the background service, configures your brains, and verifies everything works. Run it again after plugin updates to pick up the new version.
 
+## Web Viewer
+
+Once the server is running, open `http://localhost:7777` (or check `~/.grug-brain/serve.port` if the default port was taken). You get a read-only Obsidian-style browser: a brain switcher showing all configured brains, a category tree on the left, a memory list with search, a rendered markdown preview pane, and a global similarity graph powered by cytoscape.js. The viewer live-reloads via SSE when any memory file changes on disk. Theme follows your OS preference and can be toggled manually.
+
+Plan 1 (this release) ships the read-only viewer. Plan 2 will add the editor (CodeMirror 6), wikilink/tag autocomplete, rename UX, local graph, backlinks panel, outline, tag pane, and quick-switcher (Cmd-K).
+
 ## Architecture
 
 ```

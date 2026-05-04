@@ -134,6 +134,54 @@ impl BrainServices {
             }
         };
 
+        // Spawn a consumer that pipes watcher events into the DB worker for
+        // reindexing. This ensures external file edits picked up by the watcher
+        // are reflected in brain_fts before the SSE-triggered browser reload
+        // queries /api/memories. Without this, the browser reloads but sees
+        // stale data because index_file was never called for the new file.
+        if let Some(ref w) = watcher {
+            let mut rx = w.sender().subscribe();
+            let reindex_tx = db_tx.clone();
+            let mut shutdown_rx2 = _shutdown_tx.subscribe();
+            tasks.push(tokio::spawn(async move {
+                loop {
+                    tokio::select! {
+                        res = rx.recv() => {
+                            match res {
+                                Ok(evt) => {
+                                    // Trigger a grug-sync for the brain that changed.
+                                    let brain_name = match &evt {
+                                        MemoryEvent::Created { brain, .. } => Some(brain.clone()),
+                                        MemoryEvent::Modified { brain, .. } => Some(brain.clone()),
+                                        MemoryEvent::Deleted { brain, .. } => Some(brain.clone()),
+                                        MemoryEvent::Renamed { brain, .. } => Some(brain.clone()),
+                                        MemoryEvent::Lagged(_) => None,
+                                    };
+                                    if let Some(name) = brain_name {
+                                        let (reply_tx, reply_rx) = oneshot::channel();
+                                        let _ = reindex_tx.send(DbRequest {
+                                            tool: "grug-sync".to_string(),
+                                            params: json!({"brain": name}),
+                                            reply: reply_tx,
+                                        }).await;
+                                        // Await but ignore the reply — we just want reindexing
+                                        // to happen before SSE consumers poll /api/memories.
+                                        let _ = reply_rx.await;
+                                    }
+                                }
+                                Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {
+                                    // Lagged — some events dropped; trigger full sync later.
+                                    // Non-fatal; the periodic sync timer will catch up.
+                                }
+                                Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
+                            }
+                        }
+                        _ = shutdown_rx2.recv() => break,
+                    }
+                }
+            }));
+        }
+
         BrainServices {
             tasks,
             _shutdown_tx,

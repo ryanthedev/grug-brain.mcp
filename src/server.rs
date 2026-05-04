@@ -24,8 +24,13 @@ pub fn default_socket_path() -> PathBuf {
 }
 
 /// Default PID file path: ~/.grug-brain/grug.pid
-/// Default database path: ~/.grug-brain/grug.db
+/// Default database path: `~/.grug-brain/grug.db`, overridable via `GRUG_DB`.
 fn default_db_path() -> PathBuf {
+    if let Ok(p) = std::env::var("GRUG_DB") {
+        if !p.is_empty() {
+            return PathBuf::from(p);
+        }
+    }
     expand_home("~/.grug-brain/grug.db")
 }
 

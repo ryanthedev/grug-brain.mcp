@@ -98,6 +98,19 @@ pub async fn graph(
     Ok(Json(v))
 }
 
+/// Query parameters for `/api/healthz`.
+///
+/// In debug builds, `__test_force_500=1` triggers a synthetic 500 response
+/// so Playwright tests can exercise the error toast without a real failure.
+/// The field does not exist in release builds so it is never accessible in
+/// production — a `#[cfg(debug_assertions)]` field is silently absent in
+/// the compiled struct, meaning release binaries simply ignore any such param.
+#[derive(Debug, Deserialize)]
+pub struct HealthzQuery {
+    #[cfg(debug_assertions)]
+    pub __test_force_500: Option<String>,
+}
+
 #[derive(Debug, Deserialize)]
 pub struct SearchQuery {
     pub q: Option<String>,
@@ -135,7 +148,18 @@ pub async fn quickswitch(
     Ok(Json(v))
 }
 
-pub async fn healthz(State(state): State<Arc<AppState>>) -> Result<Json<Value>, ApiError> {
+pub async fn healthz(
+    State(state): State<Arc<AppState>>,
+    Query(q): Query<HealthzQuery>,
+) -> Result<Json<Value>, ApiError> {
+    // DW-4.11: In debug builds, ?__test_force_500=1 triggers a synthetic 500
+    // so Playwright tests can exercise the error toast without a real failure.
+    // This param is ignored in release builds.
+    #[cfg(debug_assertions)]
+    if q.__test_force_500.as_deref() == Some("1") {
+        return Err(ApiError::internal("forced test error"));
+    }
+
     let v = call_db(&state.db_tx, "__http/healthz", json!({})).await?;
     Ok(Json(v))
 }

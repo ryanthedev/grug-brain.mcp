@@ -706,3 +706,80 @@ async fn test_dw_3_11_assets_index_and_404() {
     handle.abort();
     drop(tmp);
 }
+
+// ---------------------------------------------------------------------------
+// DW-4.1: index.html has correct Content-Type + asset URLs contain ?v= hash
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn test_dw_4_1_index_html_content_type_and_content_hash() {
+    let (tmp, sock, db, cfg, _, _g) = setup();
+    let (handle, port) = start(sock, db, cfg).await;
+
+    let resp = client()
+        .get(format!("http://127.0.0.1:{port}/"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+
+    let ct = resp
+        .headers()
+        .get("content-type")
+        .map(|h| h.to_str().unwrap_or("").to_string())
+        .unwrap_or_default();
+    assert!(ct.starts_with("text/html"), "expected text/html Content-Type, got {ct}");
+
+    let body = resp.text().await.unwrap();
+    assert!(body.contains("grug-brain"), "index.html should mention grug-brain");
+
+    // Content-hash cache-busting: asset URLs must contain ?v= with a hex value.
+    assert!(
+        body.contains("?v="),
+        "index.html must include ?v=<hash> cache-busting query params on asset URLs"
+    );
+    // Verify placeholder substitution happened (no raw {{...}} remaining).
+    assert!(
+        !body.contains("{{"),
+        "index.html still contains unresolved template placeholders"
+    );
+
+    handle.abort();
+    drop(tmp);
+}
+
+// ---------------------------------------------------------------------------
+// DW-4.11: Test-force-500 param triggers 500 in debug builds
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+#[cfg(debug_assertions)]
+async fn test_dw_4_11_forced_500_in_debug_builds() {
+    let (tmp, sock, db, cfg, _, _g) = setup();
+    let (handle, port) = start(sock, db, cfg).await;
+
+    // Without the param: healthz should return 200.
+    let resp = client()
+        .get(format!("http://127.0.0.1:{port}/api/healthz"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200, "healthz without param should be 200");
+
+    // With the test-force-500 param: should return 500 in debug builds.
+    let resp = client()
+        .get(format!("http://127.0.0.1:{port}/api/healthz?__test_force_500=1"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 500, "healthz with __test_force_500=1 should return 500");
+    let body: Value = resp.json().await.unwrap();
+    assert_eq!(
+        body["error"].as_str().unwrap_or(""),
+        "forced test error",
+        "should return the expected error message"
+    );
+
+    handle.abort();
+    drop(tmp);
+}

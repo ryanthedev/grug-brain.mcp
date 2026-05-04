@@ -1,12 +1,93 @@
 <!doctype html>
-<html lang="en">
+<html lang="en" data-theme="dark">
 <head>
 <meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
 <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'self'">
 <title>grug-brain</title>
+<link rel="stylesheet" href="/styles.css?v={{STYLES_HASH}}">
 </head>
 <body>
-<h1>grug-brain</h1>
-<p>placeholder — Phase 4 wires the viewer.</p>
+
+<div id="app">
+
+  <!-- ── Header ──────────────────────────────────────────────────────────── -->
+  <header id="header" aria-label="grug-brain header">
+    <span class="logo" aria-hidden="true">grug-brain</span>
+    <nav id="brain-switcher" aria-label="Brain switcher">
+      <!-- Populated by app.js render.brains() -->
+      <div id="sse-status" title="Live reload connection status" aria-hidden="true"></div>
+    </nav>
+    <button id="theme-toggle" aria-label="Switch theme (current: auto)">auto</button>
+  </header>
+
+  <!-- ── Sidebar: category tree ──────────────────────────────────────────── -->
+  <nav id="sidebar" aria-label="Categories">
+    <div id="sidebar-header">Categories</div>
+    <input
+      id="search-input"
+      type="search"
+      placeholder="Filter memories…"
+      aria-label="Filter memories"
+      autocomplete="off"
+    >
+    <ul id="category-tree" role="list" aria-label="Category list">
+      <!-- Populated by app.js render.categories() -->
+    </ul>
+  </nav>
+
+  <!-- ── Main: memory list + preview ────────────────────────────────────── -->
+  <main id="main" aria-label="Memory viewer">
+
+    <!-- Empty state (shown when the selected brain has no memories) -->
+    <div id="empty-state" role="status" aria-live="polite">
+      <div class="empty-icon" aria-hidden="true">🧠</div>
+      <div class="empty-title">No memories yet</div>
+      <p class="empty-msg">
+        Add one with <code>grug-write</code> — memories appear here automatically.
+      </p>
+    </div>
+
+    <!-- Memory list panel -->
+    <aside id="memory-list-panel" aria-label="Memory list">
+      <ul
+        id="memory-list"
+        role="listbox"
+        aria-label="Memories"
+        aria-multiselectable="false"
+      >
+        <!-- Populated by app.js render.memoryList() -->
+      </ul>
+    </aside>
+
+    <!-- Preview pane -->
+    <article id="preview-panel" aria-label="Memory preview">
+      <div id="preview-content" aria-live="polite">
+        <!-- Populated by app.js render.preview() -->
+      </div>
+    </article>
+
+  </main>
+
+  <!-- ── Graph panel ─────────────────────────────────────────────────────── -->
+  <aside id="graph-panel" aria-label="Similarity graph">
+    <div id="graph-header">Graph</div>
+    <div id="cy" aria-label="Memory similarity graph (cytoscape)" role="img"></div>
+  </aside>
+
+</div><!-- #app -->
+
+<!-- Reload indicator (shown briefly after SSE-triggered reload) -->
+<div id="reload-indicator" aria-hidden="true">↻ reloaded</div>
+
+<!-- Error toast container -->
+<div id="toast-container" aria-label="Notifications" role="region"></div>
+
+<!-- Vendored dependencies loaded first so app.js can reference them. -->
+<script src="/vendor/cytoscape.min.js?v={{CYTOSCAPE_HASH}}"></script>
+<script src="/vendor/dompurify.min.js?v={{DOMPURIFY_HASH}}"></script>
+<script src="/vendor/marked.min.js?v={{MARKED_HASH}}"></script>
+<script src="/app.js?v={{APP_JS_HASH}}"></script>
+
 </body>
 </html>
