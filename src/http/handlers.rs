@@ -150,13 +150,13 @@ pub async fn quickswitch(
 
 pub async fn healthz(
     State(state): State<Arc<AppState>>,
-    Query(q): Query<HealthzQuery>,
+    Query(_q): Query<HealthzQuery>,
 ) -> Result<Json<Value>, ApiError> {
     // DW-4.11: In debug builds, ?__test_force_500=1 triggers a synthetic 500
     // so Playwright tests can exercise the error toast without a real failure.
     // This param is ignored in release builds.
     #[cfg(debug_assertions)]
-    if q.__test_force_500.as_deref() == Some("1") {
+    if _q.__test_force_500.as_deref() == Some("1") {
         return Err(ApiError::internal("forced test error"));
     }
 
