@@ -78,7 +78,8 @@ fn build_index() -> Vec<u8> {
     // Replace each placeholder with the hash of the corresponding asset.
     let replacements = [
         ("{{STYLES_HASH}}", "styles.css"),
-        ("{{CYTOSCAPE_HASH}}", "vendor/cytoscape.min.js"),
+        ("{{GRAPHOLOGY_HASH}}", "vendor/graphology.min.js"),
+        ("{{SIGMA_HASH}}", "vendor/sigma.min.js"),
         ("{{DOMPURIFY_HASH}}", "vendor/dompurify.min.js"),
         ("{{MARKED_HASH}}", "vendor/marked.min.js"),
         ("{{APP_JS_HASH}}", "app.js"),
@@ -147,7 +148,8 @@ mod tests {
         // After substitution, no raw placeholders should remain.
         assert!(!html.contains("{{APP_JS_HASH}}"), "APP_JS_HASH placeholder not replaced");
         assert!(!html.contains("{{STYLES_HASH}}"), "STYLES_HASH placeholder not replaced");
-        assert!(!html.contains("{{CYTOSCAPE_HASH}}"), "CYTOSCAPE_HASH placeholder not replaced");
+        assert!(!html.contains("{{GRAPHOLOGY_HASH}}"), "GRAPHOLOGY_HASH placeholder not replaced");
+        assert!(!html.contains("{{SIGMA_HASH}}"), "SIGMA_HASH placeholder not replaced");
         assert!(!html.contains("{{DOMPURIFY_HASH}}"), "DOMPURIFY_HASH placeholder not replaced");
         assert!(!html.contains("{{MARKED_HASH}}"), "MARKED_HASH placeholder not replaced");
         // The rendered index should still contain grug-brain.

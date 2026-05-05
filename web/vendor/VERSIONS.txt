@@ -1,0 +1,20 @@
+sigma@2.4.0
+  url: https://unpkg.com/sigma@2.4.0/build/sigma.min.js
+  size: 97311 bytes
+  global: window.Sigma
+
+graphology@0.25.4
+  url: https://unpkg.com/graphology@0.25.4/dist/graphology.umd.min.js
+  size: 74221 bytes
+  global: window.graphology
+
+dompurify@3.x (version embedded in file)
+  url: vendored from dompurify npm package build
+  global: window.DOMPurify
+
+marked@12.x (version embedded in file)
+  url: vendored from marked npm package build
+  global: window.marked
+
+Note: cytoscape removed in Plan 2 Phase 3 (was 373304 bytes).
+Net bundle delta: sigma + graphology = 171532 bytes vs cytoscape 373304 bytes = -201772 bytes.

@@ -72,7 +72,7 @@
   <!-- ── Graph panel ─────────────────────────────────────────────────────── -->
   <aside id="graph-panel" aria-label="Similarity graph">
     <div id="graph-header">Graph</div>
-    <div id="cy" aria-label="Memory similarity graph (cytoscape)" role="img"></div>
+    <div id="cy" aria-label="Memory similarity graph" role="img"></div>
   </aside>
 
 </div><!-- #app -->
@@ -84,7 +84,8 @@
 <div id="toast-container" aria-label="Notifications" role="region"></div>
 
 <!-- Vendored dependencies loaded first so app.js can reference them. -->
-<script src="/vendor/cytoscape.min.js?v={{CYTOSCAPE_HASH}}"></script>
+<script src="/vendor/graphology.min.js?v={{GRAPHOLOGY_HASH}}"></script>
+<script src="/vendor/sigma.min.js?v={{SIGMA_HASH}}"></script>
 <script src="/vendor/dompurify.min.js?v={{DOMPURIFY_HASH}}"></script>
 <script src="/vendor/marked.min.js?v={{MARKED_HASH}}"></script>
 <script src="/app.js?v={{APP_JS_HASH}}"></script>

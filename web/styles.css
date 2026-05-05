@@ -395,6 +395,9 @@ a:focus-visible,
 #cy {
   flex: 1;
   width: 100%;
+  /* sigma requires position:relative and overflow:hidden on its container */
+  position: relative;
+  overflow: hidden;
 }
 
 /* ── Empty state ──────────────────────────────────────── */
