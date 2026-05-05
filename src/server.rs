@@ -260,7 +260,11 @@ fn dispatch_tool(db: &mut GrugDb, tool: &str, params: &Value) -> Result<String, 
             let brain = extract_str(params, "brain").ok_or("missing field: brain")?;
             let old_rel = extract_str(params, "old_rel_path").ok_or("missing field: old_rel_path")?;
             let new_rel = extract_str(params, "new_rel_path").ok_or("missing field: new_rel_path")?;
-            crate::http::handlers::memory_rename_json(db, brain, old_rel, new_rel)
+            let rewrite_links = params
+                .get("rewrite_links")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(true);
+            crate::http::handlers::memory_rename_json(db, brain, old_rel, new_rel, rewrite_links)
         }
         _ => Err(format!("unknown tool: {tool}")),
     }

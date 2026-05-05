@@ -317,11 +317,23 @@ pub struct MemoryRenameBody {
     pub new_path: String,
 }
 
+/// Query parameters for POST /api/memory/:brain/:category/:path/rename.
+/// `rewrite_links` defaults to `true`: any `[[old-name]]` references across
+/// the brain are rewritten in-place as part of the rename. Pass `false` for
+/// the bare-rename escape hatch.
+#[derive(Debug, Deserialize, Default)]
+pub struct MemoryRenameQuery {
+    #[serde(default)]
+    pub rewrite_links: Option<bool>,
+}
+
 /// POST /api/memory/:brain/:category/:path/rename
-/// Renames the memory (no link rewrite). Returns 200 + {path, etag}.
+/// Renames the memory (and rewrites incoming wikilinks unless
+/// `?rewrite_links=false`). Returns 200 + {path, etag, affected_paths}.
 pub async fn memory_rename(
     State(state): State<Arc<AppState>>,
     Path((brain, category, path)): Path<(String, String, String)>,
+    Query(q): Query<MemoryRenameQuery>,
     Json(body): Json<MemoryRenameBody>,
 ) -> Result<impl IntoResponse, ApiError> {
     validate_memory_path(&category).map_err(ApiError::bad_request)?;
@@ -339,6 +351,8 @@ pub async fn memory_rename(
 
     let old_rel = format!("{category}/{path}");
 
+    let rewrite_links = q.rewrite_links.unwrap_or(true);
+
     let v = call_db(
         &state.db_tx,
         "__http/memory_rename",
@@ -346,6 +360,7 @@ pub async fn memory_rename(
             "brain": brain,
             "old_rel_path": old_rel,
             "new_rel_path": body.new_path,
+            "rewrite_links": rewrite_links,
         }),
     )
     .await?;
@@ -359,6 +374,28 @@ pub async fn memory_rename(
         }
         if err == "destination exists" {
             return Ok((StatusCode::CONFLICT, Json(v)).into_response());
+        }
+    }
+
+    // Emit a single SSE `reload` event covering every affected path so
+    // subscribers don't have to react to per-file watcher events for this
+    // multi-file operation.
+    if let Some(events) = &state.events {
+        let paths: Vec<String> = v
+            .get("affected_paths")
+            .and_then(|p| p.as_array())
+            .map(|arr| {
+                arr.iter()
+                    .filter_map(|s| s.as_str().map(|s| s.to_string()))
+                    .collect()
+            })
+            .unwrap_or_default();
+        if !paths.is_empty() {
+            let _ = events.send(crate::types::MemoryEvent::Reload {
+                brain: brain.clone(),
+                paths,
+                reason: "rename".to_string(),
+            });
         }
     }
 
@@ -954,12 +991,16 @@ pub fn memory_delete_json(
 
 /// `__http/memory_rename`: rename a memory via POST .../rename.
 ///
-/// Returns `{path, etag}` on success, or error object for readonly/notfound/duplicate.
+/// Returns `{path, etag, affected_paths}` on success, or error object for
+/// readonly/notfound/duplicate. `affected_paths` is the set of brain-relative
+/// paths whose on-disk content was rewritten or moved as part of this call
+/// (used by the HTTP layer to emit a single SSE `reload` event).
 pub fn memory_rename_json(
     db: &mut GrugDb,
     brain_name: &str,
     old_rel_path: &str,
     new_rel_path: &str,
+    rewrite_links: bool,
 ) -> Result<String, String> {
     db.maybe_reload_config();
     let brain = db.resolve_brain(Some(brain_name))?.clone();
@@ -976,32 +1017,37 @@ pub fn memory_rename_json(
     validate_memory_path(&new_cat)?;
     validate_memory_path(&new_stem)?;
 
-    let result = crate::tools::write::grug_rename(
+    let result = crate::tools::rename::grug_rename_with_links(
         db,
         &old_cat,
         &old_stem,
         &new_cat,
         &new_stem,
         Some(brain_name),
+        rewrite_links,
     );
 
     match result {
         Err(e) => {
-            // grug_rename returns Err for "source not found" and "destination already exists".
             let (err_kind, msg) = if e.contains("source not found") {
                 ("not found", e.clone())
             } else if e.contains("destination already exists") {
                 ("destination exists", e.clone())
+            } else if e.contains("read-only") {
+                ("read-only brain", e.clone())
             } else {
                 ("error", e.clone())
             };
             let v = json!({"error": err_kind, "message": msg});
             Ok(serde_json::to_string(&v).map_err(|e| e.to_string())?)
         }
-        Ok(_) => {
-            let new_canonical = format!("{new_cat}/{new_stem}.md");
+        Ok((new_canonical, affected)) => {
             let new_mtime = read_mtime(db, &brain.name, &new_canonical);
-            let v = json!({"path": new_canonical, "etag": new_mtime});
+            let v = json!({
+                "path": new_canonical,
+                "etag": new_mtime,
+                "affected_paths": affected,
+            });
             Ok(serde_json::to_string(&v).map_err(|e| e.to_string())?)
         }
     }

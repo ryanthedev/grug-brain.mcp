@@ -71,6 +71,13 @@ fn serialize_event(evt: &MemoryEvent) -> String {
             "mtime": mtime,
         })
         .to_string(),
+        MemoryEvent::Reload { brain, paths, reason } => json!({
+            "kind": "reload",
+            "brain": brain,
+            "paths": paths,
+            "reason": reason,
+        })
+        .to_string(),
         MemoryEvent::Lagged(n) => json!({"kind": "lagged", "n": n}).to_string(),
     }
 }

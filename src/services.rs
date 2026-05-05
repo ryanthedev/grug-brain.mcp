@@ -155,6 +155,7 @@ impl BrainServices {
                                         MemoryEvent::Modified { brain, .. } => Some(brain.clone()),
                                         MemoryEvent::Deleted { brain, .. } => Some(brain.clone()),
                                         MemoryEvent::Renamed { brain, .. } => Some(brain.clone()),
+                                        MemoryEvent::Reload { brain, .. } => Some(brain.clone()),
                                         MemoryEvent::Lagged(_) => None,
                                     };
                                     if let Some(name) = brain_name {

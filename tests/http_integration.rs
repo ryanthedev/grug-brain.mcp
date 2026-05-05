@@ -1292,3 +1292,236 @@ async fn test_dw_1_11_all_status_codes_per_route() {
     handle.abort();
     drop(tmp);
 }
+
+// ===========================================================================
+// Plan 2 Phase 2 — rename-with-link-rewrite
+// ===========================================================================
+
+// DW-2.5 (HTTP): rename a memory referenced by 10 others, all 10 rewritten.
+#[tokio::test]
+async fn test_dw_2_5_rename_with_10_referrers_via_http() {
+    let (tmp, sock, db, cfg, _, _g) = setup();
+    let brain_dir = cfg.brains[0].dir.clone();
+    fs::create_dir_all(brain_dir.join("notes")).unwrap();
+    fs::write(
+        brain_dir.join("notes/hub.md"),
+        "---\nname: hub\ntype: memory\n---\n\nThe hub.\n",
+    )
+    .unwrap();
+    for i in 0..10 {
+        fs::write(
+            brain_dir.join(format!("notes/r{i:02}.md")),
+            format!("---\nname: r{i}\ntype: memory\n---\n\nRef [[hub]] body{i}.\n"),
+        )
+        .unwrap();
+    }
+
+    let (handle, port) = start(sock, db, cfg).await;
+    tokio::time::sleep(Duration::from_millis(800)).await;
+
+    let base = format!("http://127.0.0.1:{port}");
+    let c = client();
+
+    let resp = post_json(
+        &c,
+        &format!("{base}/api/memory/memories/notes/hub/rename"),
+        serde_json::json!({"new_path": "notes/central"}),
+    )
+    .await;
+    assert_eq!(resp.status(), 200, "rename should return 200");
+    let body: Value = resp.json().await.unwrap();
+    let affected = body
+        .get("affected_paths")
+        .and_then(|p| p.as_array())
+        .expect("affected_paths array")
+        .clone();
+    // 10 referrers + old + new = 12
+    assert_eq!(affected.len(), 12, "got affected: {affected:?}");
+
+    // Verify each referrer rewritten on disk.
+    for i in 0..10 {
+        let body = fs::read_to_string(brain_dir.join(format!("notes/r{i:02}.md"))).unwrap();
+        assert!(
+            body.contains("[[central]]"),
+            "ref{i} not rewritten: {body}"
+        );
+        assert!(!body.contains("[[hub]]"));
+    }
+
+    handle.abort();
+    drop(tmp);
+}
+
+// DW-2.4 (HTTP): rename emits ONE `reload` SSE event covering all paths.
+#[tokio::test]
+async fn test_dw_2_4_rename_emits_single_reload_event() {
+    use futures_util::StreamExt;
+    let (tmp, sock, db, cfg, _, _g) = setup();
+    let brain_dir = cfg.brains[0].dir.clone();
+    fs::create_dir_all(brain_dir.join("notes")).unwrap();
+    fs::write(
+        brain_dir.join("notes/target.md"),
+        "---\nname: target\ntype: memory\n---\n\nThe target.\n",
+    )
+    .unwrap();
+    fs::write(
+        brain_dir.join("notes/src.md"),
+        "---\nname: src\ntype: memory\n---\n\nLink [[target]].\n",
+    )
+    .unwrap();
+
+    let (handle, port) = start(sock, db, cfg).await;
+    tokio::time::sleep(Duration::from_millis(800)).await;
+
+    let base = format!("http://127.0.0.1:{port}");
+
+    // Subscribe to SSE first.
+    let resp = client()
+        .get(format!("{base}/api/events"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+    let mut stream = resp.bytes_stream();
+
+    // Give the SSE subscriber a moment to attach.
+    tokio::time::sleep(Duration::from_millis(200)).await;
+
+    // Issue the rename.
+    let c = client();
+    let resp = post_json(
+        &c,
+        &format!("{base}/api/memory/memories/notes/target/rename"),
+        serde_json::json!({"new_path": "notes/renamed"}),
+    )
+    .await;
+    assert_eq!(resp.status(), 200);
+
+    // Collect SSE bytes for up to 3s; assert exactly one `reload` kind appears
+    // and its `paths` array contains the rename pair + the rewritten src.
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(3);
+    let mut buf = String::new();
+    let mut reload_count = 0usize;
+    let mut reload_payload: Option<Value> = None;
+    while tokio::time::Instant::now() < deadline {
+        match tokio::time::timeout(Duration::from_millis(400), stream.next()).await {
+            Ok(Some(Ok(bytes))) => {
+                buf.push_str(&String::from_utf8_lossy(&bytes));
+                // Parse complete `data: ...` lines.
+                while let Some(idx) = buf.find("data: ") {
+                    let after = &buf[idx + 6..];
+                    let nl = match after.find('\n') {
+                        Some(n) => n,
+                        None => break,
+                    };
+                    let payload = after[..nl].to_string();
+                    let next_start = idx + 6 + nl + 1;
+                    buf.drain(..next_start);
+                    if let Ok(v) = serde_json::from_str::<Value>(&payload) {
+                        if v.get("kind").and_then(|k| k.as_str()) == Some("reload") {
+                            reload_count += 1;
+                            reload_payload = Some(v);
+                        }
+                    }
+                }
+                if reload_count >= 1 {
+                    break;
+                }
+            }
+            _ => continue,
+        }
+    }
+
+    let payload = reload_payload.expect("expected exactly one `reload` event");
+    assert_eq!(reload_count, 1, "expected exactly 1 reload event, got {reload_count}");
+    let paths = payload["paths"].as_array().unwrap();
+    let strs: Vec<&str> = paths.iter().filter_map(|s| s.as_str()).collect();
+    assert!(strs.contains(&"notes/target.md"), "missing old: {strs:?}");
+    assert!(strs.contains(&"notes/renamed.md"), "missing new: {strs:?}");
+    assert!(strs.contains(&"notes/src.md"), "missing src: {strs:?}");
+    assert_eq!(payload["reason"], "rename");
+
+    handle.abort();
+    drop(tmp);
+}
+
+// DW-2.7 (HTTP): ?rewrite_links=false skips on-disk rewrite.
+#[tokio::test]
+async fn test_dw_2_7_rewrite_links_false_via_http() {
+    let (tmp, sock, db, cfg, _, _g) = setup();
+    let brain_dir = cfg.brains[0].dir.clone();
+    fs::create_dir_all(brain_dir.join("notes")).unwrap();
+    fs::write(
+        brain_dir.join("notes/target.md"),
+        "---\nname: target\ntype: memory\n---\n\nbody\n",
+    )
+    .unwrap();
+    fs::write(
+        brain_dir.join("notes/src.md"),
+        "---\nname: src\ntype: memory\n---\n\nLink [[target]] here.\n",
+    )
+    .unwrap();
+
+    let (handle, port) = start(sock, db, cfg).await;
+    tokio::time::sleep(Duration::from_millis(800)).await;
+
+    let base = format!("http://127.0.0.1:{port}");
+    let c = client();
+
+    let resp = post_json(
+        &c,
+        &format!("{base}/api/memory/memories/notes/target/rename?rewrite_links=false"),
+        serde_json::json!({"new_path": "notes/renamed"}),
+    )
+    .await;
+    assert_eq!(resp.status(), 200);
+
+    let src_body = fs::read_to_string(brain_dir.join("notes/src.md")).unwrap();
+    assert!(
+        src_body.contains("[[target]]"),
+        "rewrite_links=false must NOT touch src body, got: {src_body}"
+    );
+
+    handle.abort();
+    drop(tmp);
+}
+
+// DW-2.7 (HTTP): default behavior rewrites links.
+#[tokio::test]
+async fn test_dw_2_7_rewrite_links_default_true_via_http() {
+    let (tmp, sock, db, cfg, _, _g) = setup();
+    let brain_dir = cfg.brains[0].dir.clone();
+    fs::create_dir_all(brain_dir.join("notes")).unwrap();
+    fs::write(
+        brain_dir.join("notes/target.md"),
+        "---\nname: target\ntype: memory\n---\n\nbody\n",
+    )
+    .unwrap();
+    fs::write(
+        brain_dir.join("notes/src.md"),
+        "---\nname: src\ntype: memory\n---\n\nLink [[target]] here.\n",
+    )
+    .unwrap();
+
+    let (handle, port) = start(sock, db, cfg).await;
+    tokio::time::sleep(Duration::from_millis(800)).await;
+
+    let base = format!("http://127.0.0.1:{port}");
+    let c = client();
+
+    // No query param -> default true.
+    let resp = post_json(
+        &c,
+        &format!("{base}/api/memory/memories/notes/target/rename"),
+        serde_json::json!({"new_path": "notes/renamed"}),
+    )
+    .await;
+    assert_eq!(resp.status(), 200);
+
+    let src_body = fs::read_to_string(brain_dir.join("notes/src.md")).unwrap();
+    assert!(src_body.contains("[[renamed]]"), "default must rewrite: {src_body}");
+    assert!(!src_body.contains("[[target]]"));
+
+    handle.abort();
+    drop(tmp);
+}

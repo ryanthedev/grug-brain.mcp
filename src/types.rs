@@ -112,6 +112,11 @@ pub enum MemoryEvent {
     Deleted { brain: String, path: String },
     /// File renamed within the brain. `from` and `to` are brain-relative.
     Renamed { brain: String, from: String, to: String, mtime: f64 },
+    /// Reload hint: a multi-file backend operation (e.g.
+    /// rename-with-link-rewrite) touched several paths atomically. Carriers
+    /// should reload all affected views in one batch instead of reacting to
+    /// per-file events.
+    Reload { brain: String, paths: Vec<String>, reason: String },
     /// Subscriber lagged: missed `n` events. Subscribers should reload state.
     Lagged(u64),
 }

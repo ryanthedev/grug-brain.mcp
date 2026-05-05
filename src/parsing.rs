@@ -5,7 +5,7 @@ use std::sync::LazyLock;
 /// Match `[[target]]` where `target` may contain spaces, slashes, hyphens, or
 /// other readable characters. We deliberately reject `]` and newlines in the
 /// target. `[\[\[` and `\]\]` are escaped for clarity.
-static LINK_RE: LazyLock<Regex> =
+pub(crate) static LINK_RE: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"\[\[([^\]\n]+?)\]\]").expect("link regex"));
 
 /// Match `#tag` where the tag chars are alphanumeric, `-`, `_`, or `/`. We
@@ -63,6 +63,35 @@ pub fn extract_body(content: &str) -> String {
         }
     }
     content.trim().to_string()
+}
+
+/// Split a markdown file into its frontmatter prefix (including the closing
+/// `---\n`) and the body. The frontmatter prefix is byte-identical to the
+/// input prefix; concatenating the two halves reproduces the original.
+///
+/// If the file has no frontmatter, the prefix is empty and `body` is the
+/// entire input.
+pub fn split_frontmatter_and_body(content: &str) -> (&str, &str) {
+    if content.starts_with("---\n") || content.starts_with("---\r\n") {
+        // Find closing fence "\n---" after the opening line.
+        if let Some(pos) = content[3..].find("\n---") {
+            // Closing fence ends at content[3+pos+4]; advance past trailing
+            // newline if present so the body starts on its first content
+            // line.
+            let mut end = 3 + pos + 4;
+            // Skip the newline after the closing `---`.
+            if content.as_bytes().get(end) == Some(&b'\r') {
+                end += 1;
+            }
+            if content.as_bytes().get(end) == Some(&b'\n') {
+                end += 1;
+            }
+            if end <= content.len() {
+                return (&content[..end], &content[end..]);
+            }
+        }
+    }
+    ("", content)
 }
 
 /// Extract a description from the body: first non-empty, non-header, non-code line.
