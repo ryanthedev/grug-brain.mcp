@@ -203,9 +203,63 @@
 
   <!-- ── Graph panel ─────────────────────────────────────────────────────── -->
   <aside id="graph-panel" aria-label="Similarity graph">
-    <div id="graph-header">Graph</div>
+    <div id="graph-header">
+      <span>Graph</span>
+      <button id="graph-mode-toggle" type="button" aria-pressed="false"
+              aria-label="Toggle global / local-N-hop graph view">global</button>
+    </div>
     <div id="cy" aria-label="Memory similarity graph" role="img"></div>
   </aside>
+
+  <!-- ── Phase 6: side panels (backlinks, outline, tag pane) ─────────────── -->
+  <aside id="side-panels" aria-label="Side panels">
+    <section id="panel-backlinks" class="side-panel" aria-label="Backlinks">
+      <header class="side-panel-header">
+        <button class="side-panel-toggle" type="button" aria-expanded="true"
+                aria-controls="panel-backlinks-body">Backlinks</button>
+      </header>
+      <div id="panel-backlinks-body" class="side-panel-body">
+        <p class="side-panel-empty">Open a memory to see who links to it.</p>
+      </div>
+    </section>
+
+    <section id="panel-outline" class="side-panel" aria-label="Outline">
+      <header class="side-panel-header">
+        <button class="side-panel-toggle" type="button" aria-expanded="true"
+                aria-controls="panel-outline-body">Outline</button>
+      </header>
+      <div id="panel-outline-body" class="side-panel-body">
+        <p class="side-panel-empty">Open a memory to see its headings.</p>
+      </div>
+    </section>
+
+    <section id="panel-tags" class="side-panel" aria-label="Tags">
+      <header class="side-panel-header">
+        <button class="side-panel-toggle" type="button" aria-expanded="true"
+                aria-controls="panel-tags-body">Tags</button>
+      </header>
+      <div id="panel-tags-body" class="side-panel-body">
+        <p class="side-panel-empty">No tags yet.</p>
+      </div>
+    </section>
+  </aside>
+
+  <!-- ── Phase 6: Cmd-K palette ──────────────────────────────────────────── -->
+  <div id="palette-modal" class="grug-modal" role="dialog" aria-modal="true"
+       aria-labelledby="palette-title" hidden>
+    <div class="modal-backdrop"></div>
+    <div class="modal-body modal-body-palette">
+      <h2 id="palette-title" class="visually-hidden">Command palette</h2>
+      <input id="palette-input" type="text" autocomplete="off"
+             placeholder="Type to search memories, categories, commands..."
+             aria-label="Palette search"
+             aria-autocomplete="list"
+             aria-controls="palette-list"
+             aria-expanded="true"
+             role="combobox" />
+      <ul id="palette-list" role="listbox" aria-label="Palette results"></ul>
+    </div>
+  </div>
 
 </div><!-- #app -->
 

@@ -223,6 +223,22 @@ fn dispatch_tool(db: &mut GrugDb, tool: &str, params: &Value) -> Result<String, 
             crate::http::handlers::quickswitch_json(db, q)
         }
         "__http/healthz" => crate::http::handlers::healthz_json(db),
+        // Phase 6 read-only endpoints.
+        "__http/tags" => {
+            let brain = extract_str(params, "brain");
+            crate::http::handlers::tags_json(db, brain)
+        }
+        "__http/backlinks" => {
+            let brain = extract_str(params, "brain");
+            let path = extract_str(params, "path").ok_or("missing field: path")?;
+            crate::http::handlers::backlinks_json(db, brain, path)
+        }
+        "__http/graph_local" => {
+            let brain = extract_str(params, "brain");
+            let path = extract_str(params, "path").ok_or("missing field: path")?;
+            let hops = extract_u64(params, "hops").unwrap_or(2);
+            crate::http::handlers::graph_local_json(db, brain, path, hops)
+        }
         // Write-path routes (Plan 2 Phase 1).
         "__http/memory_write" => {
             let brain = extract_str(params, "brain").ok_or("missing field: brain")?;

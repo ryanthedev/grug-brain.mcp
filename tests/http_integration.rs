@@ -1525,3 +1525,240 @@ async fn test_dw_2_7_rewrite_links_default_true_via_http() {
     handle.abort();
     drop(tmp);
 }
+
+// ===========================================================================
+// Phase 6: /api/tags, /api/backlinks, /api/graph/local
+// ===========================================================================
+
+// DW-6.6: GET /api/tags returns [{tag, count}] for the active brain.
+#[tokio::test]
+async fn test_dw_6_6_tags_endpoint_returns_tag_counts() {
+    let (tmp, sock, db, cfg, _, _g) = setup();
+    let brain_dir = cfg.brains[0].dir.clone();
+    fs::create_dir_all(brain_dir.join("notes")).unwrap();
+    // Two memories with overlapping tags.
+    fs::write(
+        brain_dir.join("notes/a.md"),
+        "---\nname: a\ntype: memory\n---\n\nBody #rust #systems content.\n",
+    )
+    .unwrap();
+    fs::write(
+        brain_dir.join("notes/b.md"),
+        "---\nname: b\ntype: memory\n---\n\nBody #rust note.\n",
+    )
+    .unwrap();
+
+    let (handle, port) = start(sock, db, cfg).await;
+    tokio::time::sleep(Duration::from_millis(800)).await;
+    let base = format!("http://127.0.0.1:{port}");
+
+    let v: Value = client()
+        .get(format!("{base}/api/tags?brain=memories"))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert!(v.is_array(), "/api/tags should be array: {v}");
+    let arr = v.as_array().unwrap();
+    let by_tag: std::collections::HashMap<String, i64> = arr
+        .iter()
+        .map(|o| {
+            (
+                o["tag"].as_str().unwrap().to_string(),
+                o["count"].as_i64().unwrap(),
+            )
+        })
+        .collect();
+    assert_eq!(by_tag.get("rust").copied(), Some(2), "rust count: {arr:?}");
+    assert_eq!(by_tag.get("systems").copied(), Some(1), "systems: {arr:?}");
+
+    handle.abort();
+    drop(tmp);
+}
+
+// DW-6.7: GET /api/backlinks?brain=&path= returns memories that wikilink to {path}.
+#[tokio::test]
+async fn test_dw_6_7_backlinks_endpoint_returns_referrers() {
+    let (tmp, sock, db, cfg, _, _g) = setup();
+    let brain_dir = cfg.brains[0].dir.clone();
+    fs::create_dir_all(brain_dir.join("notes")).unwrap();
+    // Target named "anchor" so it sorts before "src*" — walker indexes
+    // alphabetically and `[[anchor]]` must resolve at src-indexing time.
+    fs::write(
+        brain_dir.join("notes/anchor.md"),
+        "---\nname: anchor\ntype: memory\n---\n\nthe target body.\n",
+    )
+    .unwrap();
+    fs::write(
+        brain_dir.join("notes/src1.md"),
+        "---\nname: src1\ntype: memory\n---\n\nrefers to [[anchor]].\n",
+    )
+    .unwrap();
+    fs::write(
+        brain_dir.join("notes/src2.md"),
+        "---\nname: src2\ntype: memory\n---\n\nalso [[anchor]] here.\n",
+    )
+    .unwrap();
+    fs::write(
+        brain_dir.join("notes/unrelated.md"),
+        "---\nname: unrelated\ntype: memory\n---\n\nno link.\n",
+    )
+    .unwrap();
+
+    let (handle, port) = start(sock, db, cfg).await;
+    tokio::time::sleep(Duration::from_millis(800)).await;
+    let base = format!("http://127.0.0.1:{port}");
+
+    let v: Value = client()
+        .get(format!(
+            "{base}/api/backlinks?brain=memories&path=notes/anchor.md"
+        ))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert!(v.is_array(), "backlinks should be array: {v}");
+    let arr = v.as_array().unwrap();
+    assert_eq!(arr.len(), 2, "expected 2 backlinks: {v}");
+    let paths: std::collections::HashSet<String> = arr
+        .iter()
+        .map(|o| o["path"].as_str().unwrap().to_string())
+        .collect();
+    assert!(paths.contains("notes/src1.md"));
+    assert!(paths.contains("notes/src2.md"));
+    // shape: each row has name and category
+    for row in arr {
+        assert!(row.get("name").is_some(), "backlink row missing name: {row}");
+        assert!(row.get("category").is_some(), "backlink missing category: {row}");
+        assert!(row.get("brain").is_some(), "backlink missing brain: {row}");
+    }
+
+    handle.abort();
+    drop(tmp);
+}
+
+// DW-6.7 (negative): traversal in path is rejected.
+#[tokio::test]
+async fn test_dw_6_7_backlinks_rejects_traversal() {
+    let (tmp, sock, db, cfg, _, _g) = setup();
+    let (handle, port) = start(sock, db, cfg).await;
+    tokio::time::sleep(Duration::from_millis(400)).await;
+    let base = format!("http://127.0.0.1:{port}");
+
+    let resp = client()
+        .get(format!(
+            "{base}/api/backlinks?brain=memories&path=../etc/passwd"
+        ))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 400, "traversal must 400");
+
+    handle.abort();
+    drop(tmp);
+}
+
+// DW-6.8: GET /api/graph/local?path=...&hops=2 returns N-hop neighborhood.
+#[tokio::test]
+async fn test_dw_6_8_graph_local_returns_n_hop_neighborhood() {
+    let (tmp, sock, db, cfg, _, _g) = setup();
+    let brain_dir = cfg.brains[0].dir.clone();
+    fs::create_dir_all(brain_dir.join("notes")).unwrap();
+    // Chain a ← b ← c ← d (i.e., d→c→b→a in link arrows). Files seeded with
+    // names ordered so that target of each link is indexed BEFORE the source
+    // (alphabetical walker order: a, b, c, d). a is leaf, d is the entry.
+    // BFS from `d` with hops=2: visit {d, c, b}, exclude a.
+    fs::write(
+        brain_dir.join("notes/a.md"),
+        "---\nname: a\ntype: memory\n---\n\nleaf\n",
+    )
+    .unwrap();
+    fs::write(
+        brain_dir.join("notes/b.md"),
+        "---\nname: b\ntype: memory\n---\n\nlinks [[a]]\n",
+    )
+    .unwrap();
+    fs::write(
+        brain_dir.join("notes/c.md"),
+        "---\nname: c\ntype: memory\n---\n\nlinks [[b]]\n",
+    )
+    .unwrap();
+    fs::write(
+        brain_dir.join("notes/d.md"),
+        "---\nname: d\ntype: memory\n---\n\nlinks [[c]]\n",
+    )
+    .unwrap();
+
+    let (handle, port) = start(sock, db, cfg).await;
+    tokio::time::sleep(Duration::from_millis(900)).await;
+    let base = format!("http://127.0.0.1:{port}");
+
+    let v: Value = client()
+        .get(format!(
+            "{base}/api/graph/local?brain=memories&path=notes/d.md&hops=2"
+        ))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert!(v.get("nodes").is_some(), "no nodes: {v}");
+    assert!(v.get("edges").is_some(), "no edges: {v}");
+    let node_paths: std::collections::HashSet<String> = v["nodes"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|n| n["path"].as_str().unwrap().to_string())
+        .collect();
+    assert!(node_paths.contains("notes/d.md"), "focus missing: {node_paths:?}");
+    assert!(node_paths.contains("notes/c.md"), "1-hop missing: {node_paths:?}");
+    assert!(node_paths.contains("notes/b.md"), "2-hop missing: {node_paths:?}");
+    assert!(!node_paths.contains("notes/a.md"), "3-hop must NOT appear: {node_paths:?}");
+
+    handle.abort();
+    drop(tmp);
+}
+
+// DW-6.8: hops=0 returns just the focus node and no edges.
+#[tokio::test]
+async fn test_dw_6_8_graph_local_hops_zero_returns_focus_only() {
+    let (tmp, sock, db, cfg, _, _g) = setup();
+    let brain_dir = cfg.brains[0].dir.clone();
+    fs::create_dir_all(brain_dir.join("notes")).unwrap();
+    fs::write(
+        brain_dir.join("notes/a.md"),
+        "---\nname: a\ntype: memory\n---\n\nleaf\n",
+    )
+    .unwrap();
+    fs::write(
+        brain_dir.join("notes/b.md"),
+        "---\nname: b\ntype: memory\n---\n\nlinks [[a]]\n",
+    )
+    .unwrap();
+
+    let (handle, port) = start(sock, db, cfg).await;
+    tokio::time::sleep(Duration::from_millis(800)).await;
+    let base = format!("http://127.0.0.1:{port}");
+
+    let v: Value = client()
+        .get(format!(
+            "{base}/api/graph/local?brain=memories&path=notes/b.md&hops=0"
+        ))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let nodes = v["nodes"].as_array().unwrap();
+    assert_eq!(nodes.len(), 1, "hops=0 should return only focus: {v}");
+    assert_eq!(nodes[0]["path"].as_str(), Some("notes/b.md"));
+
+    handle.abort();
+    drop(tmp);
+}

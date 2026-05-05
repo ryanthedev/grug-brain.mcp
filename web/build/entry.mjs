@@ -20,3 +20,11 @@ export { defaultKeymap, history, historyKeymap } from "@codemirror/commands";
 export { syntaxHighlighting, defaultHighlightStyle, HighlightStyle } from "@codemirror/language";
 export { markdown } from "@codemirror/lang-markdown";
 export { basicSetup } from "codemirror";
+export {
+  autocompletion,
+  completionKeymap,
+  startCompletion,
+  closeCompletion,
+  acceptCompletion,
+  CompletionContext,
+} from "@codemirror/autocomplete";

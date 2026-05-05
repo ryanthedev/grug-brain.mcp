@@ -100,6 +100,22 @@
       return this.get(`/api/graph?brain=${encodeURIComponent(brain)}&mode=global`);
     },
 
+    // Phase 6 read-only endpoints.
+    async tags(brain) {
+      const q = brain ? `?brain=${encodeURIComponent(brain)}` : "";
+      return this.get(`/api/tags${q}`);
+    },
+    async backlinks(brain, path) {
+      return this.get(
+        `/api/backlinks?brain=${encodeURIComponent(brain)}&path=${encodeURIComponent(path)}`
+      );
+    },
+    async graphLocal(brain, path, hops) {
+      return this.get(
+        `/api/graph/local?brain=${encodeURIComponent(brain)}&path=${encodeURIComponent(path)}&hops=${encodeURIComponent(hops|0)}`
+      );
+    },
+
     /**
      * PUT JSON to a path with required If-Match ETag header.
      * Returns {ok, status, data, error}. Never throws. Always sends the
@@ -420,6 +436,8 @@
         li.setAttribute("tabindex", "0");
         li.dataset.path = m.path;
         li.dataset.category = m.category;
+        // Phase 6: tags drive tagpane filter; comma-separated in dataset.
+        if (Array.isArray(m.tags)) li.dataset.tags = m.tags.join(",");
 
         // All user content inserted via textContent.
         const nameDiv = document.createElement("div");
@@ -801,7 +819,29 @@
       sigmaInstance.refresh();
     }
 
-    return { render: renderGraph, updateTheme };
+    /**
+     * Render a local N-hop neighborhood. Same shape as `render`, but the
+     * node matching `focusPath` (if given) is enlarged + accent-colored so
+     * users can locate the focused memory in the layout.
+     */
+    function renderLocal(data, opts) {
+      opts = opts || {};
+      renderGraph(data);
+      if (!sigmaInstance) return;
+      const focusPath = opts.focusPath;
+      if (!focusPath) return;
+      try {
+        const g = sigmaInstance.getGraph();
+        if (g.hasNode(focusPath)) {
+          const accent = themeColors().edgeExplicitColor;
+          g.setNodeAttribute(focusPath, "size", 10);
+          g.setNodeAttribute(focusPath, "color", accent);
+          sigmaInstance.refresh();
+        }
+      } catch (_) { /* sigma version mismatch — ignore */ }
+    }
+
+    return { render: renderGraph, renderLocal, updateTheme };
   })();
 
   // ── Frontmatter form ──────────────────────────────────────────────────────
@@ -971,20 +1011,28 @@
         if (u.docChanged) onChange(u.state.doc.toString());
       });
 
-      const startState = CM.EditorState.create({
-        doc,
-        extensions: [
-          CM.basicSetup,
-          CM.markdown(),
-          buildDecorationsPlugin(CM),
-          saveKeymap(CM),
-          updateListener,
-          CM.EditorView.theme({
-            "&": { height: "100%" },
-            ".cm-scroller": { fontFamily: "var(--font-mono)" },
-          }),
-        ],
-      });
+      const extensions = [
+        CM.basicSetup,
+        CM.markdown(),
+        buildDecorationsPlugin(CM),
+        saveKeymap(CM),
+        updateListener,
+        CM.EditorView.theme({
+          "&": { height: "100%" },
+          ".cm-scroller": { fontFamily: "var(--font-mono)" },
+        }),
+      ];
+      // Phase 6: wikilink + tag autocomplete. Bundle was re-rolled to include
+      // @codemirror/autocomplete; CM.autocompletion is the runtime probe.
+      if (CM.autocompletion) {
+        try {
+          extensions.push(...autocomplete.extension(CM));
+          window.__grugACWired = true;
+        } catch (e) {
+          window.__grugACError = String(e);
+        }
+      }
+      const startState = CM.EditorState.create({ doc, extensions });
 
       const view = new CM.EditorView({ state: startState, parent: container });
       currentView = view;
@@ -1605,15 +1653,523 @@
   // ── Commands (Cmd-K stub for Phase 5; palette UI in Phase 6) ──────────────
 
   const commands = (() => {
+    // registry[name] = { fn, title, kind }
     const registry = {};
-    function register(name, fn) { registry[name] = fn; }
+    function register(name, fn, opts) {
+      const o = opts || {};
+      registry[name] = {
+        fn,
+        title: o.title || name,
+        kind: o.kind || "command",
+      };
+    }
     function run(name, ...args) {
-      const fn = registry[name];
-      if (!fn) return false;
-      fn(...args);
+      const e = registry[name];
+      if (!e) return false;
+      e.fn(...args);
       return true;
     }
-    return { register, run };
+    function list() {
+      return Object.entries(registry).map(([name, e]) => ({
+        name, title: e.title, kind: e.kind,
+      }));
+    }
+    return { register, run, list };
+  })();
+
+  // ── Phase 6: autocomplete ─────────────────────────────────────────────────
+
+  /**
+   * autocomplete.* — CodeMirror autocompletion for `[[wikilinks]]` and `#tags`.
+   *
+   * Triggers on typing `[[` (wikilink) or `#` (tag). Suggestions are pulled
+   * from `state.memories` (already loaded for the active brain) and a cached
+   * tag list fetched lazily from `/api/tags`. The cache is invalidated by SSE
+   * Reload (sse.connect already calls render fns; we hook here for tags).
+   */
+  const autocomplete = (() => {
+    let tagsCache = null;
+    let tagsCacheBrain = null;
+
+    async function ensureTags(brain) {
+      if (tagsCache && tagsCacheBrain === brain) return tagsCache;
+      const r = await api.tags(brain);
+      tagsCache = (r.ok && Array.isArray(r.data)) ? r.data : [];
+      tagsCacheBrain = brain;
+      return tagsCache;
+    }
+
+    function invalidate() {
+      tagsCache = null;
+      tagsCacheBrain = null;
+    }
+
+    function memoryOptions() {
+      const s = state.get();
+      return (s.memories || []).map(m => ({
+        label: m.name,
+        type: "wikilink",
+        // CM gives us the matched range (`from`..`to`); we insert the bare
+        // name there. Trigger source already positions `from` after the `[[`.
+        // After the bare name, also append `]]` to close the wikilink (and
+        // overwrite any auto-paired `]]` immediately following the cursor).
+        apply: (view, completion, from, to) => {
+          const doc = view.state.doc;
+          const tail = doc.sliceString(to, Math.min(to + 2, doc.length));
+          const insert = m.name + (tail === "]]" ? "" : "]]");
+          // Move cursor past the closing `]]`.
+          const cursor = from + insert.length + (tail === "]]" ? 2 : 0);
+          view.dispatch({
+            changes: { from, to, insert },
+            selection: { anchor: cursor },
+          });
+        },
+      }));
+    }
+
+    function tagOptionsFromCache() {
+      return (tagsCache || []).map(t => ({
+        label: t.tag,
+        detail: String(t.count),
+        type: "tag",
+        apply: (view, completion, from, to) => {
+          // `from` already points to the position after the `#` trigger.
+          view.dispatch({
+            changes: { from, to, insert: t.tag },
+            selection: { anchor: from + t.tag.length },
+          });
+        },
+      }));
+    }
+
+    /**
+     * Build the CodeMirror autocompletion extension. Two complete sources:
+     *   1. Wikilink: trigger /\[\[([\w-]*)$/ — completes to `[[name]]`
+     *   2. Tag:      trigger /(?:^|\s)#([\w-]*)$/ — completes to `#tag`
+     * Both return null when no match (so other completion sources still work).
+     */
+    function extension(CMns) {
+      function wikilinkSource(ctx) {
+        const m = ctx.matchBefore(/\[\[[\w \-]*/);
+        if (!m) return null;
+        if (m.from === m.to && !ctx.explicit) return null;
+        // `from` skips the `[[` so CM's built-in filter compares the typed
+        // partial against option labels (which are bare names, not `[[name]]`).
+        const from = m.from + 2;
+        const options = memoryOptions();
+        return {
+          from,
+          // The full match including `[[` is replaced by `[[name]]` per option.apply.
+          // To make the replacement cover the `[[` itself, we set `from` BEFORE
+          // them via the `apply` callback below.
+          options,
+          validFor: /^[\w \-]*$/,
+        };
+      }
+      async function tagSource(ctx) {
+        // Match the `#` plus any word chars; require start-of-line or whitespace before.
+        const m = ctx.matchBefore(/(^|\s)#[\w-]*/);
+        if (!m) return null;
+        const text = m.text;
+        // `from` after the `#` so CM filters the partial against tag names.
+        const hashIdx = text.lastIndexOf("#");
+        const from = m.from + hashIdx + 1;
+        if (from === ctx.pos && !ctx.explicit) return null;
+        const s = state.get();
+        await ensureTags(s.activeBrain);
+        return {
+          from,
+          options: tagOptionsFromCache(),
+          validFor: /^[\w-]*$/,
+        };
+      }
+      return [
+        CMns.autocompletion({
+          override: [wikilinkSource, tagSource],
+          activateOnTyping: true,
+        }),
+      ];
+    }
+
+    return { extension, invalidate };
+  })();
+
+  // ── Phase 6: backlinks panel ──────────────────────────────────────────────
+
+  const backlinks = (() => {
+    let token = 0;
+    async function render() {
+      const myToken = ++token;
+      const body = document.getElementById("panel-backlinks-body");
+      if (!body) return;
+      const s = state.get();
+      while (body.firstChild) body.removeChild(body.firstChild);
+      if (!s.activeMemoryPath || !s.activeBrain) {
+        const p = document.createElement("p");
+        p.className = "side-panel-empty";
+        p.textContent = "Open a memory to see who links to it.";
+        body.appendChild(p);
+        return;
+      }
+      const r = await api.backlinks(s.activeBrain, s.activeMemoryPath);
+      if (myToken !== token) return; // a newer render superseded us
+      // Re-clear in case state changed while awaiting.
+      while (body.firstChild) body.removeChild(body.firstChild);
+      if (!r.ok) {
+        const p = document.createElement("p");
+        p.className = "side-panel-empty";
+        p.textContent = "Could not load backlinks.";
+        body.appendChild(p);
+        return;
+      }
+      const rows = Array.isArray(r.data) ? r.data : [];
+      if (rows.length === 0) {
+        const p = document.createElement("p");
+        p.className = "side-panel-empty";
+        p.textContent = "No backlinks.";
+        body.appendChild(p);
+        return;
+      }
+      rows.forEach(row => {
+        const btn = document.createElement("button");
+        btn.type = "button";
+        btn.className = "side-panel-item backlink-item";
+        // Plain textContent — never trust user data with innerHTML.
+        btn.textContent = row.name || row.path;
+        btn.dataset.path = row.path;
+        btn.dataset.category = row.category || "";
+        btn.addEventListener("click", () => {
+          router.navigate({
+            memoryPath: row.path,
+            memoryCategory: row.category,
+          });
+        });
+        body.appendChild(btn);
+      });
+    }
+    return { render };
+  })();
+
+  // ── Phase 6: outline panel ────────────────────────────────────────────────
+
+  const outline = (() => {
+    /** Parse markdown headings from the buffer body. Skips fenced code blocks. */
+    function parseHeadings(text) {
+      if (!text) return [];
+      const lines = text.split("\n");
+      const out = [];
+      let inFence = false;
+      for (let i = 0; i < lines.length; i++) {
+        const line = lines[i];
+        if (/^```/.test(line)) { inFence = !inFence; continue; }
+        if (inFence) continue;
+        const m = /^(#{1,6})\s+(.+?)\s*#*\s*$/.exec(line);
+        if (m) out.push({ level: m[1].length, text: m[2], line: i + 1 });
+      }
+      return out;
+    }
+
+    function render() {
+      const body = document.getElementById("panel-outline-body");
+      if (!body) return;
+      while (body.firstChild) body.removeChild(body.firstChild);
+      const s = state.get();
+      const text = (s.buffer && s.buffer.body) || (s.preview && s.preview.body) || "";
+      const headings = parseHeadings(text);
+      if (headings.length === 0) {
+        const p = document.createElement("p");
+        p.className = "side-panel-empty";
+        p.textContent = "No headings.";
+        body.appendChild(p);
+        return;
+      }
+      headings.forEach(h => {
+        const btn = document.createElement("button");
+        btn.type = "button";
+        btn.className = `side-panel-item outline-item outline-h${h.level}`;
+        btn.textContent = h.text;
+        btn.dataset.line = String(h.line);
+        btn.addEventListener("click", () => {
+          // If editor is mounted, jump to that line; else scroll preview.
+          const view = window.__grugEditorView;
+          if (view && view.state && view.dispatch) {
+            try {
+              const lineInfo = view.state.doc.line(Math.min(h.line, view.state.doc.lines));
+              view.dispatch({
+                selection: { anchor: lineInfo.from },
+                effects: [],
+                scrollIntoView: true,
+              });
+              view.focus();
+            } catch (_) {}
+          } else {
+            // Read mode: try to scroll the preview pane to a heading element by text.
+            const preview = document.getElementById("preview-content");
+            if (!preview) return;
+            const headers = preview.querySelectorAll("h1,h2,h3,h4,h5,h6");
+            for (const el of headers) {
+              if (el.textContent.trim() === h.text) {
+                el.scrollIntoView({ behavior: "smooth", block: "start" });
+                break;
+              }
+            }
+          }
+        });
+        body.appendChild(btn);
+      });
+    }
+    return { render, parseHeadings };
+  })();
+
+  // ── Phase 6: tag pane ─────────────────────────────────────────────────────
+
+  const tagpane = (() => {
+    let activeTag = null;
+    let token = 0;
+
+    function getActiveTag() { return activeTag; }
+
+    async function render() {
+      const myToken = ++token;
+      const body = document.getElementById("panel-tags-body");
+      if (!body) return;
+      const s = state.get();
+      while (body.firstChild) body.removeChild(body.firstChild);
+      if (!s.activeBrain) {
+        const p = document.createElement("p");
+        p.className = "side-panel-empty";
+        p.textContent = "No active brain.";
+        body.appendChild(p);
+        return;
+      }
+      const r = await api.tags(s.activeBrain);
+      if (myToken !== token) return;
+      // Re-clear after await — state could have changed.
+      while (body.firstChild) body.removeChild(body.firstChild);
+      const rows = (r.ok && Array.isArray(r.data)) ? r.data : [];
+      if (rows.length === 0) {
+        const p = document.createElement("p");
+        p.className = "side-panel-empty";
+        p.textContent = "No tags yet.";
+        body.appendChild(p);
+        return;
+      }
+      rows.forEach(row => {
+        const btn = document.createElement("button");
+        btn.type = "button";
+        btn.className = "side-panel-item tag-item";
+        if (row.tag === activeTag) btn.setAttribute("aria-pressed", "true");
+        const name = document.createElement("span");
+        name.className = "tag-name";
+        name.textContent = `#${row.tag}`;
+        const count = document.createElement("span");
+        count.className = "tag-count";
+        count.textContent = `(${row.count})`;
+        btn.appendChild(name);
+        btn.appendChild(count);
+        btn.dataset.tag = row.tag;
+        btn.addEventListener("click", () => {
+          activeTag = (activeTag === row.tag) ? null : row.tag;
+          // Re-render memory list with tag filter applied.
+          const s2 = state.get();
+          render(); // refresh aria-pressed
+          renderFilteredMemoryList(s2);
+        });
+        body.appendChild(btn);
+      });
+    }
+
+    function renderFilteredMemoryList(s) {
+      // Hook into render.memoryList — we filter the in-state memories array
+      // for display but don't mutate state. The simpler approach: subscribe-
+      // friendly is to use the existing render but filter via dataset.
+      // For now: hide memory-list items whose tags don't include activeTag.
+      const list = document.querySelectorAll("#memory-list .memory-item");
+      list.forEach(li => {
+        if (!activeTag) { li.hidden = false; return; }
+        const tagsAttr = li.dataset.tags || "";
+        const has = tagsAttr.split(",").map(t => t.trim()).includes(activeTag);
+        li.hidden = !has;
+      });
+    }
+
+    return { render, getActiveTag, renderFilteredMemoryList };
+  })();
+
+  // ── Phase 6: Cmd-K palette ────────────────────────────────────────────────
+
+  const palette = (() => {
+    let handle = null;
+    let items = [];          // current filtered items
+    let selectedIdx = 0;
+
+    /** Score how well `query` matches `title`. Returns null if no match. */
+    function fuzzyScore(query, title) {
+      if (!query) return 0;
+      const q = query.toLowerCase();
+      const t = title.toLowerCase();
+      // 1. Initials match
+      const initials = title.split(/[\s\-_/.]+/).filter(Boolean)
+        .map(w => w[0] || "").join("").toLowerCase();
+      if (initials.startsWith(q)) return 100 - (initials.length - q.length);
+      // 2. Substring match
+      const idx = t.indexOf(q);
+      if (idx >= 0) {
+        const wordBoundary = idx === 0 || /[\s\-_/.]/.test(t[idx - 1]);
+        return 50 - idx + (wordBoundary ? 25 : 0);
+      }
+      // 3. Char subsequence
+      let qi = 0;
+      for (let i = 0; i < t.length && qi < q.length; i++) {
+        if (t[i] === q[qi]) qi++;
+      }
+      if (qi === q.length) return 10 - title.length / 100;
+      return null;
+    }
+
+    function gatherAll() {
+      const s = state.get();
+      const out = [];
+      // Memories
+      (s.memories || []).forEach(m => {
+        out.push({
+          kind: "memory",
+          title: m.name,
+          subtitle: m.path,
+          action: () => router.navigate({
+            memoryPath: m.path,
+            memoryCategory: m.category,
+          }),
+        });
+      });
+      // Categories (unique)
+      const cats = new Set();
+      (s.memories || []).forEach(m => { if (m.category) cats.add(m.category); });
+      cats.forEach(c => {
+        out.push({
+          kind: "category",
+          title: c,
+          action: () => router.navigate({ category: c }),
+        });
+      });
+      // Commands
+      commands.list().forEach(c => {
+        out.push({
+          kind: "command",
+          title: c.title,
+          name: c.name,
+          action: () => commands.run(c.name),
+        });
+      });
+      return out;
+    }
+
+    function filter(query) {
+      const all = gatherAll();
+      const scored = all
+        .map(item => ({ item, score: fuzzyScore(query, item.title) }))
+        .filter(x => x.score !== null)
+        .sort((a, b) => b.score - a.score || a.item.title.length - b.item.title.length)
+        .slice(0, 50);
+      return scored.map(x => x.item);
+    }
+
+    function renderList() {
+      const ul = document.getElementById("palette-list");
+      if (!ul) return;
+      while (ul.firstChild) ul.removeChild(ul.firstChild);
+      items.forEach((item, i) => {
+        const li = document.createElement("li");
+        li.className = "palette-item" + (i === selectedIdx ? " active" : "");
+        li.id = `palette-item-${i}`;
+        li.setAttribute("role", "option");
+        li.setAttribute("aria-selected", i === selectedIdx ? "true" : "false");
+        const kind = document.createElement("span");
+        kind.className = "palette-kind";
+        kind.textContent = item.kind;
+        const title = document.createElement("span");
+        title.className = "palette-title";
+        title.textContent = item.title;
+        li.appendChild(kind);
+        li.appendChild(title);
+        li.addEventListener("click", () => {
+          selectedIdx = i;
+          dispatchSelected();
+        });
+        ul.appendChild(li);
+      });
+      const input = document.getElementById("palette-input");
+      if (input) {
+        if (items.length > 0) {
+          input.setAttribute("aria-activedescendant", `palette-item-${selectedIdx}`);
+        } else {
+          input.removeAttribute("aria-activedescendant");
+        }
+      }
+    }
+
+    function dispatchSelected() {
+      const sel = items[selectedIdx];
+      if (!sel) return;
+      close();
+      // Defer so close()'s focus restoration completes first.
+      setTimeout(() => sel.action(), 0);
+    }
+
+    function open() {
+      const el = document.getElementById("palette-modal");
+      if (!el || handle) return;
+      const input = document.getElementById("palette-input");
+      if (input) input.value = "";
+      items = gatherAll().slice(0, 50);
+      selectedIdx = 0;
+      renderList();
+      handle = modal.open(el, { focusTarget: input });
+      if (input) {
+        input.addEventListener("input", onInput);
+        input.addEventListener("keydown", onKeydown);
+      }
+    }
+
+    function close() {
+      if (!handle) return;
+      const input = document.getElementById("palette-input");
+      if (input) {
+        input.removeEventListener("input", onInput);
+        input.removeEventListener("keydown", onKeydown);
+      }
+      handle.close();
+      handle = null;
+    }
+
+    function toggle() {
+      if (handle) close(); else open();
+    }
+
+    function onInput(e) {
+      items = filter(e.target.value);
+      selectedIdx = 0;
+      renderList();
+    }
+
+    function onKeydown(e) {
+      if (e.key === "ArrowDown") {
+        e.preventDefault();
+        if (items.length === 0) return;
+        selectedIdx = (selectedIdx + 1) % items.length;
+        renderList();
+      } else if (e.key === "ArrowUp") {
+        e.preventDefault();
+        if (items.length === 0) return;
+        selectedIdx = (selectedIdx - 1 + items.length) % items.length;
+        renderList();
+      } else if (e.key === "Enter") {
+        e.preventDefault();
+        dispatchSelected();
+      }
+    }
+
+    return { open, close, toggle, _filter: filter, _gather: gatherAll };
   })();
 
   // ── SSE ───────────────────────────────────────────────────────────────────
@@ -1641,6 +2197,8 @@
     function scheduleReload() {
       if (reloadDebounce) clearTimeout(reloadDebounce);
       reloadDebounce = setTimeout(async () => {
+        // Phase 6: invalidate autocomplete tag cache on any reload.
+        if (typeof autocomplete !== "undefined") autocomplete.invalidate();
         const s = state.get();
         if (s.activeBrain) {
           await loadMemories(s.activeBrain);
@@ -1949,6 +2507,12 @@
     render.preview(s.preview);
     renderToolbar(s);
     renderEditSurface(s);
+    // Phase 6: side panels.
+    backlinks.render();
+    outline.render();
+    tagpane.render();
+    // Re-apply tag filter (memory list may have just re-rendered).
+    tagpane.renderFilteredMemoryList(s);
   });
 
   // ── Boot ───────────────────────────────────────────────────────────────────
@@ -1989,8 +2553,56 @@
     // Phase 5: wire conflict + CRUD modals + commands.
     conflict.wire();
     crud.wire();
-    commands.register("new-memory", (cat) => crud.openDraft(cat));
+    commands.register("new-memory", (cat) => crud.openDraft(cat),
+      { title: "New memory", kind: "command" });
+    // Phase 6: register palette commands.
+    commands.register("toggle-theme", () => theme.toggle(),
+      { title: "Toggle theme", kind: "command" });
+    commands.register("rename", () => {
+      const s = state.get();
+      if (s.activeMemoryPath) crud.openRename();
+      else toast.show("Open a memory to rename it");
+    }, { title: "Rename memory", kind: "command" });
+    commands.register("delete", () => {
+      const s = state.get();
+      if (s.activeMemoryPath) crud.openDelete();
+      else toast.show("Open a memory to delete it");
+    }, { title: "Delete memory", kind: "command" });
+    commands.register("jump-to-category", () => {
+      const s = state.get();
+      const cats = Array.from(new Set((s.memories || []).map(m => m.category).filter(Boolean)));
+      if (cats.length === 0) { toast.show("No categories"); return; }
+      router.navigate({ category: cats[0] });
+    }, { title: "Jump to category", kind: "command" });
     window.__grugCommands = commands;
+    window.__grugPalette = palette;
+
+    // Phase 6: Cmd-K opens the palette.
+    window.addEventListener("keydown", e => {
+      if ((e.metaKey || e.ctrlKey) && (e.key === "k" || e.key === "K")) {
+        e.preventDefault();
+        palette.toggle();
+      }
+    });
+
+    // Phase 6: graph mode toggle (global ↔ local-N-hop).
+    const graphModeBtn = document.getElementById("graph-mode-toggle");
+    if (graphModeBtn) {
+      graphModeBtn.addEventListener("click", async () => {
+        const pressed = graphModeBtn.getAttribute("aria-pressed") === "true";
+        const next = !pressed;
+        graphModeBtn.setAttribute("aria-pressed", next ? "true" : "false");
+        graphModeBtn.textContent = next ? "local" : "global";
+        const s = state.get();
+        if (next && s.activeMemoryPath) {
+          const r = await api.graphLocal(s.activeBrain, s.activeMemoryPath, 2);
+          if (r.ok) graph.renderLocal(r.data, { focusPath: s.activeMemoryPath });
+        } else if (s.activeBrain) {
+          const r = await api.graph(s.activeBrain);
+          if (r.ok) graph.render(r.data);
+        }
+      });
+    }
 
     // Window-level Cmd-S / Ctrl-S — fires save.run from anywhere in the page
     // (form fields, toolbar, etc). The CodeMirror keymap handles in-editor.

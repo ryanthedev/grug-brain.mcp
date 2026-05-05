@@ -170,6 +170,83 @@ pub async fn csrf_probe() -> impl IntoResponse {
 }
 
 // ---------------------------------------------------------------------------
+// Phase 6: tags + backlinks + local-graph
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Deserialize)]
+pub struct TagsQuery {
+    pub brain: Option<String>,
+}
+
+/// GET /api/tags?brain=... → `[{"tag": String, "count": i64}]`.
+/// Aggregates the indexer-populated `tags` table.
+pub async fn tags(
+    State(state): State<Arc<AppState>>,
+    Query(q): Query<TagsQuery>,
+) -> Result<Json<Value>, ApiError> {
+    let v = call_db(&state.db_tx, "__http/tags", json!({"brain": q.brain})).await?;
+    Ok(Json(v))
+}
+
+#[derive(Debug, Deserialize)]
+pub struct BacklinksQuery {
+    pub brain: Option<String>,
+    pub path: String,
+}
+
+/// GET /api/backlinks?brain=&path= → array of memories that wikilink to `{brain, path}`.
+/// `path` is a brain-relative `category/name.md`. Validated against traversal.
+pub async fn backlinks(
+    State(state): State<Arc<AppState>>,
+    Query(q): Query<BacklinksQuery>,
+) -> Result<Json<Value>, ApiError> {
+    // Path traversal defense — both segments separately.
+    let (cat, file) = q
+        .path
+        .rsplit_once('/')
+        .ok_or_else(|| ApiError::bad_request("path must be category/name.md"))?;
+    validate_memory_path(cat).map_err(ApiError::bad_request)?;
+    validate_memory_path(file).map_err(ApiError::bad_request)?;
+    let v = call_db(
+        &state.db_tx,
+        "__http/backlinks",
+        json!({"brain": q.brain, "path": q.path}),
+    )
+    .await?;
+    Ok(Json(v))
+}
+
+#[derive(Debug, Deserialize)]
+pub struct GraphLocalQuery {
+    pub brain: Option<String>,
+    pub path: String,
+    pub hops: Option<u64>,
+}
+
+/// GET /api/graph/local?brain=&path=&hops=N → `{nodes, edges}` for the
+/// N-hop neighborhood around `{brain, path}` in the wikilink graph.
+/// `hops` defaults to 2 and is capped at 3.
+pub async fn graph_local(
+    State(state): State<Arc<AppState>>,
+    Query(q): Query<GraphLocalQuery>,
+) -> Result<Json<Value>, ApiError> {
+    let (cat, file) = q
+        .path
+        .rsplit_once('/')
+        .ok_or_else(|| ApiError::bad_request("path must be category/name.md"))?;
+    validate_memory_path(cat).map_err(ApiError::bad_request)?;
+    validate_memory_path(file).map_err(ApiError::bad_request)?;
+    let hops = q.hops.unwrap_or(2).min(3);
+    let v = call_db(
+        &state.db_tx,
+        "__http/graph_local",
+        json!({"brain": q.brain, "path": q.path, "hops": hops}),
+    )
+    .await?;
+    Ok(Json(v))
+}
+
+// ---------------------------------------------------------------------------
 // Write handlers (Plan 2 Phase 1)
 // ---------------------------------------------------------------------------
 
@@ -544,6 +621,17 @@ pub fn memories_json(db: &mut GrugDb, brain: Option<&str>) -> Result<String, Str
                 |row| row.get(0),
             )
             .unwrap_or(0.0);
+        // Tags for this memory (Phase 6: drives the tag-pane filter).
+        let tags: Vec<String> = db
+            .conn()
+            .prepare("SELECT tag FROM tags WHERE brain = ?1 AND path = ?2 ORDER BY tag")
+            .ok()
+            .and_then(|mut s| {
+                s.query_map(rusqlite::params![&brain, &path], |row| row.get::<_, String>(0))
+                    .ok()
+                    .map(|it| it.filter_map(|r| r.ok()).collect())
+            })
+            .unwrap_or_default();
         out.push(json!({
             "path": path,
             "brain": brain,
@@ -552,6 +640,7 @@ pub fn memories_json(db: &mut GrugDb, brain: Option<&str>) -> Result<String, Str
             "description": description,
             "date": date,
             "mtime": mtime,
+            "tags": tags,
         }));
     }
     serde_json::to_string(&Value::Array(out)).map_err(|e| e.to_string())
@@ -759,6 +848,212 @@ pub fn quickswitch_json(db: &mut GrugDb, query: &str) -> Result<String, String> 
         .filter_map(|r| r.ok())
         .collect();
     serde_json::to_string(&json!({"hits": hits})).map_err(|e| e.to_string())
+}
+
+// ---------------------------------------------------------------------------
+// Phase 6 DB-thread producers: tags, backlinks, graph_local
+// ---------------------------------------------------------------------------
+
+/// `__http/tags`: aggregate the `tags` table into `[{tag, count}]`.
+/// If `brain` is `None`, aggregates across all brains.
+pub fn tags_json(db: &mut GrugDb, brain: Option<&str>) -> Result<String, String> {
+    db.maybe_reload_config();
+    let brain_owned: Option<String> = match brain {
+        Some(name) => Some(db.resolve_brain(Some(name))?.name.clone()),
+        None => None,
+    };
+    let (sql, params): (&str, Vec<&dyn rusqlite::types::ToSql>) = match &brain_owned {
+        Some(name) => (
+            "SELECT tag, COUNT(*) AS c FROM tags WHERE brain = ?1 \
+             GROUP BY tag ORDER BY c DESC, tag ASC",
+            vec![name as &dyn rusqlite::types::ToSql],
+        ),
+        None => (
+            "SELECT tag, COUNT(*) AS c FROM tags \
+             GROUP BY tag ORDER BY c DESC, tag ASC",
+            vec![],
+        ),
+    };
+    let mut stmt = db.conn().prepare(sql).map_err(|e| e.to_string())?;
+    let rows: Vec<Value> = stmt
+        .query_map(params.as_slice(), |row| {
+            Ok(json!({
+                "tag": row.get::<_, String>(0)?,
+                "count": row.get::<_, i64>(1)?,
+            }))
+        })
+        .map_err(|e| e.to_string())?
+        .filter_map(|r| r.ok())
+        .collect();
+    serde_json::to_string(&Value::Array(rows)).map_err(|e| e.to_string())
+}
+
+/// `__http/backlinks`: who links to `{brain, path}`?
+/// Returns `[{path, brain, category, name}]` enriched from `brain_fts`.
+pub fn backlinks_json(
+    db: &mut GrugDb,
+    brain: Option<&str>,
+    path: &str,
+) -> Result<String, String> {
+    db.maybe_reload_config();
+    let target_brain = db.resolve_brain(brain)?.name.clone();
+    let mut stmt = db
+        .conn()
+        .prepare(
+            "SELECT l.brain, l.src_path, f.category, f.name \
+             FROM links l \
+             JOIN brain_fts f ON f.brain = l.brain AND f.path = l.src_path \
+             WHERE l.target_brain = ?1 AND l.target_path = ?2 \
+             ORDER BY l.brain, f.category, f.name",
+        )
+        .map_err(|e| e.to_string())?;
+    let rows: Vec<Value> = stmt
+        .query_map(rusqlite::params![&target_brain, path], |row| {
+            Ok(json!({
+                "brain":    row.get::<_, String>(0)?,
+                "path":     row.get::<_, String>(1)?,
+                "category": row.get::<_, String>(2)?,
+                "name":     row.get::<_, String>(3)?,
+            }))
+        })
+        .map_err(|e| e.to_string())?
+        .filter_map(|r| r.ok())
+        .collect();
+    serde_json::to_string(&Value::Array(rows)).map_err(|e| e.to_string())
+}
+
+/// `__http/graph_local`: BFS over `links` (both directions) up to `hops`.
+/// Returns `{nodes, edges}` shaped like `graph_json` so frontend can reuse `graph.render`.
+pub fn graph_local_json(
+    db: &mut GrugDb,
+    brain: Option<&str>,
+    path: &str,
+    hops: u64,
+) -> Result<String, String> {
+    db.maybe_reload_config();
+    const VISIT_CAP: usize = 200;
+    let focus_brain = db.resolve_brain(brain)?.name.clone();
+    let focus_key = (focus_brain.clone(), path.to_string());
+
+    use std::collections::{HashMap, HashSet};
+    let mut visited: HashSet<(String, String)> = HashSet::new();
+    visited.insert(focus_key.clone());
+    let mut frontier: Vec<(String, String)> = vec![focus_key.clone()];
+    let mut edges: Vec<((String, String), (String, String))> = Vec::new();
+
+    let mut out_stmt = db
+        .conn()
+        .prepare(
+            "SELECT target_brain, target_path FROM links \
+             WHERE brain = ?1 AND src_path = ?2 \
+             AND target_brain IS NOT NULL AND target_path IS NOT NULL",
+        )
+        .map_err(|e| e.to_string())?;
+    let mut in_stmt = db
+        .conn()
+        .prepare(
+            "SELECT brain, src_path FROM links \
+             WHERE target_brain = ?1 AND target_path = ?2",
+        )
+        .map_err(|e| e.to_string())?;
+
+    for _ in 0..hops {
+        let mut next: Vec<(String, String)> = Vec::new();
+        for (b, p) in &frontier {
+            if visited.len() >= VISIT_CAP {
+                break;
+            }
+            // outgoing
+            let out_neighbors: Vec<(String, String)> = out_stmt
+                .query_map(rusqlite::params![b, p], |row| {
+                    Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+                })
+                .map_err(|e| e.to_string())?
+                .filter_map(|r| r.ok())
+                .collect();
+            for n in out_neighbors {
+                edges.push(((b.clone(), p.clone()), n.clone()));
+                if !visited.contains(&n) && visited.len() < VISIT_CAP {
+                    visited.insert(n.clone());
+                    next.push(n);
+                }
+            }
+            // incoming
+            let in_neighbors: Vec<(String, String)> = in_stmt
+                .query_map(rusqlite::params![b, p], |row| {
+                    Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+                })
+                .map_err(|e| e.to_string())?
+                .filter_map(|r| r.ok())
+                .collect();
+            for n in in_neighbors {
+                edges.push((n.clone(), (b.clone(), p.clone())));
+                if !visited.contains(&n) && visited.len() < VISIT_CAP {
+                    visited.insert(n.clone());
+                    next.push(n);
+                }
+            }
+        }
+        if next.is_empty() {
+            break;
+        }
+        frontier = next;
+    }
+
+    // Enrich nodes from brain_fts.
+    let mut node_meta: HashMap<(String, String), (String, String)> = HashMap::new();
+    {
+        let mut meta_stmt = db
+            .conn()
+            .prepare("SELECT category, name FROM brain_fts WHERE brain = ?1 AND path = ?2")
+            .map_err(|e| e.to_string())?;
+        for k in &visited {
+            let row: Option<(String, String)> = meta_stmt
+                .query_row(rusqlite::params![&k.0, &k.1], |row| {
+                    Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+                })
+                .ok();
+            if let Some(r) = row {
+                node_meta.insert(k.clone(), r);
+            }
+        }
+    }
+
+    let nodes: Vec<Value> = visited
+        .iter()
+        .map(|k| {
+            let (cat, name) = node_meta
+                .get(k)
+                .cloned()
+                .unwrap_or_else(|| (String::new(), k.1.clone()));
+            json!({
+                "brain": k.0,
+                "path":  k.1,
+                "category": cat,
+                "name": name,
+            })
+        })
+        .collect();
+
+    // Dedup edges (undirected, keep "explicit" kind).
+    let mut seen: HashSet<(String, String, String, String)> = HashSet::new();
+    let mut edge_values: Vec<Value> = Vec::new();
+    for (a, b) in edges {
+        let mut key = [a.clone(), b.clone()];
+        key.sort();
+        let k = (key[0].0.clone(), key[0].1.clone(), key[1].0.clone(), key[1].1.clone());
+        if seen.insert(k) {
+            edge_values.push(json!({
+                "src": {"brain": a.0, "path": a.1},
+                "dst": {"brain": b.0, "path": b.1},
+                "kind": "explicit",
+                "score": 1.0,
+            }));
+        }
+    }
+
+    serde_json::to_string(&json!({"nodes": nodes, "edges": edge_values}))
+        .map_err(|e| e.to_string())
 }
 
 pub fn healthz_json(db: &mut GrugDb) -> Result<String, String> {

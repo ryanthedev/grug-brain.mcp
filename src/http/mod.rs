@@ -65,6 +65,10 @@ pub fn build_router(state: AppState) -> Router {
         .route("/api/quickswitch", get(handlers::quickswitch))
         .route("/api/healthz", get(handlers::healthz))
         .route("/api/events", get(sse::events))
+        // Phase 6: tags / backlinks / local-graph.
+        .route("/api/tags", get(handlers::tags))
+        .route("/api/backlinks", get(handlers::backlinks))
+        .route("/api/graph/local", get(handlers::graph_local))
         // Write routes (Plan 2 Phase 1).
         .route(
             "/api/memory/:brain/:category/:path",
