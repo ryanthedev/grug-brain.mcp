@@ -21,7 +21,7 @@ use crate::server::DbRequest;
 use crate::types::MemoryEvent;
 use axum::extract::DefaultBodyLimit;
 use axum::middleware;
-use axum::routing::{any, get};
+use axum::routing::{any, get, post, put};
 use axum::Router;
 use std::net::SocketAddr;
 use std::path::PathBuf;
@@ -65,8 +65,17 @@ pub fn build_router(state: AppState) -> Router {
         .route("/api/quickswitch", get(handlers::quickswitch))
         .route("/api/healthz", get(handlers::healthz))
         .route("/api/events", get(sse::events))
-        // Mutating-route placeholder. Plan 2 fills in real write endpoints;
-        // for Phase 3 it exists to exercise the CSRF middleware.
+        // Write routes (Plan 2 Phase 1).
+        .route(
+            "/api/memory/:brain/:category/:path",
+            put(handlers::memory_write).delete(handlers::memory_delete),
+        )
+        .route(
+            "/api/memory/:brain/:category/:path/rename",
+            post(handlers::memory_rename),
+        )
+        .route("/api/memory", post(handlers::memory_create))
+        // CSRF probe (kept for backward compat).
         .route("/api/_csrf_probe", any(handlers::csrf_probe));
 
     Router::new()

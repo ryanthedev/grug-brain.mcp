@@ -783,3 +783,512 @@ async fn test_dw_4_11_forced_500_in_debug_builds() {
     handle.abort();
     drop(tmp);
 }
+
+// ---------------------------------------------------------------------------
+// Phase 2 (Plan 2) write-route helpers
+// ---------------------------------------------------------------------------
+
+/// Build a `setup`-style config with a read-only brain named "docs".
+fn setup_readonly() -> (TempDir, PathBuf, PathBuf, BrainConfig, PathBuf, EnvGuard) {
+    let guard = EnvGuard(ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner()));
+    let tmp = TempDir::new().unwrap();
+    let brain_dir = tmp.path().join("docs");
+    fs::create_dir_all(&brain_dir).unwrap();
+
+    let config = BrainConfig {
+        brains: vec![Brain {
+            name: "docs".to_string(),
+            dir: brain_dir,
+            primary: true,
+            writable: false,
+            flat: false,
+            git: None,
+            sync_interval: 60,
+            source: None,
+            refresh_interval: None,
+        }],
+        primary: "docs".to_string(),
+        config_path: tmp.path().join("brains.json"),
+        last_mtime: None,
+    };
+    let cfg_json = serde_json::json!([{
+        "name": "docs",
+        "dir": config.brains[0].dir.to_str().unwrap(),
+        "primary": true,
+        "writable": false,
+    }]);
+    fs::write(&config.config_path, cfg_json.to_string()).unwrap();
+
+    let socket_path = tmp.path().join("test.sock");
+    let db_path = tmp.path().join("grug.db");
+    let port_file = tmp.path().join("serve.port");
+    unsafe {
+        std::env::set_var("GRUG_PORT_FILE", &port_file);
+    }
+    (tmp, socket_path, db_path, config, port_file, guard)
+}
+
+async fn post_json(c: &reqwest::Client, url: &str, body: Value) -> reqwest::Response {
+    c.post(url)
+        .header("X-Grug-Client", "web")
+        .json(&body)
+        .send()
+        .await
+        .unwrap()
+}
+
+async fn put_json(
+    c: &reqwest::Client,
+    url: &str,
+    body: Value,
+    etag: Option<f64>,
+) -> reqwest::Response {
+    let mut req = c.put(url).header("X-Grug-Client", "web").json(&body);
+    if let Some(e) = etag {
+        req = req.header("If-Match", e.to_string());
+    }
+    req.send().await.unwrap()
+}
+
+async fn delete_json(c: &reqwest::Client, url: &str) -> reqwest::Response {
+    c.delete(url)
+        .header("X-Grug-Client", "web")
+        .send()
+        .await
+        .unwrap()
+}
+
+// ---------------------------------------------------------------------------
+// DW-1.1: PUT /api/memory/:brain/:category/:path — 200 + new ETag on success
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn test_dw_1_1_put_updates_memory_returns_200_and_etag() {
+    let (tmp, sock, db, cfg, _, _g) = setup();
+    let brain_dir = cfg.brains[0].dir.clone();
+    fs::create_dir_all(brain_dir.join("notes")).unwrap();
+    fs::write(
+        brain_dir.join("notes/hello.md"),
+        "---\nname: hello\ndate: 2025-01-01\ntype: memory\n---\n\noriginal body",
+    )
+    .unwrap();
+
+    let (handle, port) = start(sock, db, cfg).await;
+    tokio::time::sleep(Duration::from_millis(800)).await;
+
+    let base = format!("http://127.0.0.1:{port}");
+    let c = client();
+
+    let mem: Value = c
+        .get(format!("{base}/api/memory/memories/notes/hello"))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let etag: f64 = mem["mtime"].as_f64().expect("mtime");
+
+    let resp = put_json(
+        &c,
+        &format!("{base}/api/memory/memories/notes/hello"),
+        serde_json::json!({"body": "updated body", "frontmatter": "name: hello\ndate: 2025-01-01\ntype: memory"}),
+        Some(etag),
+    )
+    .await;
+
+    assert_eq!(resp.status(), 200, "PUT should return 200 on success");
+    let body: Value = resp.json().await.unwrap();
+    assert!(body.get("etag").is_some(), "response should include etag: {body}");
+    assert_eq!(body["ok"], true);
+
+    handle.abort();
+    drop(tmp);
+}
+
+// ---------------------------------------------------------------------------
+// DW-1.2: PUT with stale If-Match — 409 + structured ConflictResponse
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn test_dw_1_2_put_stale_etag_returns_409_conflict_response() {
+    let (tmp, sock, db, cfg, _, _g) = setup();
+    let brain_dir = cfg.brains[0].dir.clone();
+    fs::create_dir_all(brain_dir.join("notes")).unwrap();
+    fs::write(
+        brain_dir.join("notes/conflict-me.md"),
+        "---\nname: conflict-me\ndate: 2025-01-01\ntype: memory\n---\n\ncurrent body",
+    )
+    .unwrap();
+
+    let (handle, port) = start(sock, db, cfg).await;
+    tokio::time::sleep(Duration::from_millis(800)).await;
+
+    let base = format!("http://127.0.0.1:{port}");
+    let c = client();
+
+    let resp = put_json(
+        &c,
+        &format!("{base}/api/memory/memories/notes/conflict-me"),
+        serde_json::json!({"body": "attempted body", "frontmatter": "name: conflict-me\ndate: 2025-01-01\ntype: memory"}),
+        Some(0.0001),
+    )
+    .await;
+
+    assert_eq!(resp.status(), 409, "stale ETag should return 409");
+    let body: Value = resp.json().await.unwrap();
+    assert_eq!(body["error"], "conflict", "error field: {body}");
+    assert!(body.get("current_etag").is_some(), "missing current_etag: {body}");
+    assert!(body.get("current_body").is_some(), "missing current_body: {body}");
+    assert!(body.get("attempted_body").is_some(), "missing attempted_body: {body}");
+
+    handle.abort();
+    drop(tmp);
+}
+
+// ---------------------------------------------------------------------------
+// DW-1.3: POST /api/memory — create + 201; duplicate → 409
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn test_dw_1_3_post_creates_memory_201() {
+    let (tmp, sock, db, cfg, _, _g) = setup();
+    let (handle, port) = start(sock, db, cfg).await;
+    tokio::time::sleep(Duration::from_millis(400)).await;
+
+    let resp = post_json(
+        &client(),
+        &format!("http://127.0.0.1:{port}/api/memory"),
+        serde_json::json!({
+            "path": "notes/brand-new",
+            "body": "hello world",
+            "frontmatter": "name: brand-new\ndate: 2025-01-01\ntype: memory"
+        }),
+    )
+    .await;
+
+    assert_eq!(resp.status(), 201, "create should return 201");
+    let body: Value = resp.json().await.unwrap();
+    assert!(body.get("path").is_some(), "response missing path: {body}");
+    assert!(body.get("etag").is_some(), "response missing etag: {body}");
+
+    handle.abort();
+    drop(tmp);
+}
+
+#[tokio::test]
+async fn test_dw_1_3_post_duplicate_returns_409() {
+    let (tmp, sock, db, cfg, _, _g) = setup();
+    let brain_dir = cfg.brains[0].dir.clone();
+    fs::create_dir_all(brain_dir.join("notes")).unwrap();
+    fs::write(
+        brain_dir.join("notes/existing.md"),
+        "---\nname: existing\ndate: 2025-01-01\ntype: memory\n---\n\nbody",
+    )
+    .unwrap();
+
+    let (handle, port) = start(sock, db, cfg).await;
+    tokio::time::sleep(Duration::from_millis(800)).await;
+
+    let resp = post_json(
+        &client(),
+        &format!("http://127.0.0.1:{port}/api/memory"),
+        serde_json::json!({
+            "path": "notes/existing",
+            "body": "duplicate",
+            "frontmatter": "name: existing\ndate: 2025-01-01\ntype: memory"
+        }),
+    )
+    .await;
+
+    assert_eq!(resp.status(), 409, "duplicate create should return 409");
+
+    handle.abort();
+    drop(tmp);
+}
+
+// ---------------------------------------------------------------------------
+// DW-1.4: DELETE — 204 on success and 204 on missing (idempotent)
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn test_dw_1_4_delete_returns_204_on_success() {
+    let (tmp, sock, db, cfg, _, _g) = setup();
+    let brain_dir = cfg.brains[0].dir.clone();
+    fs::create_dir_all(brain_dir.join("notes")).unwrap();
+    fs::write(
+        brain_dir.join("notes/doomed.md"),
+        "---\nname: doomed\ndate: 2025-01-01\ntype: memory\n---\n\nbody",
+    )
+    .unwrap();
+
+    let (handle, port) = start(sock, db, cfg).await;
+    tokio::time::sleep(Duration::from_millis(800)).await;
+
+    let resp = delete_json(
+        &client(),
+        &format!("http://127.0.0.1:{port}/api/memory/memories/notes/doomed"),
+    )
+    .await;
+    assert_eq!(resp.status(), 204, "DELETE of existing file should return 204");
+
+    handle.abort();
+    drop(tmp);
+}
+
+#[tokio::test]
+async fn test_dw_1_4_delete_returns_204_on_missing() {
+    let (tmp, sock, db, cfg, _, _g) = setup();
+    let (handle, port) = start(sock, db, cfg).await;
+    tokio::time::sleep(Duration::from_millis(400)).await;
+
+    let resp = delete_json(
+        &client(),
+        &format!("http://127.0.0.1:{port}/api/memory/memories/notes/nonexistent"),
+    )
+    .await;
+    assert_eq!(resp.status(), 204, "DELETE of missing file should return 204 (idempotent)");
+
+    handle.abort();
+    drop(tmp);
+}
+
+// ---------------------------------------------------------------------------
+// DW-1.5: POST rename — 200 + new path + ETag
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn test_dw_1_5_rename_returns_200_new_path_etag() {
+    let (tmp, sock, db, cfg, _, _g) = setup();
+    let brain_dir = cfg.brains[0].dir.clone();
+    fs::create_dir_all(brain_dir.join("notes")).unwrap();
+    fs::write(
+        brain_dir.join("notes/old-name.md"),
+        "---\nname: old-name\ndate: 2025-01-01\ntype: memory\n---\n\nbody",
+    )
+    .unwrap();
+
+    let (handle, port) = start(sock, db, cfg).await;
+    tokio::time::sleep(Duration::from_millis(800)).await;
+
+    let base = format!("http://127.0.0.1:{port}");
+    let c = client();
+
+    let resp = post_json(
+        &c,
+        &format!("{base}/api/memory/memories/notes/old-name/rename"),
+        serde_json::json!({"new_path": "notes/new-name"}),
+    )
+    .await;
+
+    assert_eq!(resp.status(), 200, "rename should return 200");
+    let body: Value = resp.json().await.unwrap();
+    assert!(body.get("path").is_some(), "missing path: {body}");
+    assert!(body.get("etag").is_some(), "missing etag: {body}");
+    assert!(
+        body["path"].as_str().unwrap_or("").contains("new-name"),
+        "path should reflect new name: {body}"
+    );
+    assert!(!brain_dir.join("notes/old-name.md").exists());
+    assert!(brain_dir.join("notes/new-name.md").exists());
+
+    handle.abort();
+    drop(tmp);
+}
+
+// ---------------------------------------------------------------------------
+// DW-1.6: All 5 routes return 403 on read-only brain
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn test_dw_1_6_all_write_routes_403_on_readonly() {
+    let (tmp, sock, db, cfg, _, _g) = setup_readonly();
+    let (handle, port) = start(sock, db, cfg).await;
+    tokio::time::sleep(Duration::from_millis(400)).await;
+
+    let base = format!("http://127.0.0.1:{port}");
+    let c = client();
+
+    let resp = put_json(
+        &c,
+        &format!("{base}/api/memory/docs/notes/test"),
+        serde_json::json!({"body": "x", "frontmatter": "name: test"}),
+        Some(0.0),
+    )
+    .await;
+    assert_eq!(resp.status(), 403, "PUT on read-only brain should return 403");
+
+    let resp = post_json(
+        &c,
+        &format!("{base}/api/memory"),
+        serde_json::json!({"path": "notes/new", "body": "x", "frontmatter": "name: new", "brain": "docs"}),
+    )
+    .await;
+    assert_eq!(resp.status(), 403, "POST create on read-only brain should return 403");
+
+    let resp = delete_json(&c, &format!("{base}/api/memory/docs/notes/test")).await;
+    assert_eq!(resp.status(), 403, "DELETE on read-only brain should return 403");
+
+    let resp = post_json(
+        &c,
+        &format!("{base}/api/memory/docs/notes/test/rename"),
+        serde_json::json!({"new_path": "notes/other"}),
+    )
+    .await;
+    assert_eq!(resp.status(), 403, "rename on read-only brain should return 403");
+
+    handle.abort();
+    drop(tmp);
+}
+
+// ---------------------------------------------------------------------------
+// DW-1.7: All write routes reject path-traversal with 400
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn test_dw_1_7_all_write_routes_400_on_traversal() {
+    let (tmp, sock, db, cfg, _, _g) = setup();
+    let brain_dir = cfg.brains[0].dir.clone();
+    let (handle, port) = start(sock, db, cfg).await;
+
+    // Seed file for rename traversal test.
+    fs::create_dir_all(brain_dir.join("notes")).unwrap();
+    fs::write(
+        brain_dir.join("notes/real.md"),
+        "---\nname: real\ntype: memory\n---\n\nbody",
+    )
+    .unwrap();
+    tokio::time::sleep(Duration::from_millis(800)).await;
+
+    let base = format!("http://127.0.0.1:{port}");
+    let c = client();
+
+    // POST create with traversal in path field.
+    let resp = post_json(
+        &c,
+        &format!("{base}/api/memory"),
+        serde_json::json!({"path": "../escape/bad", "body": "x", "frontmatter": "name: bad"}),
+    )
+    .await;
+    assert!(
+        resp.status().is_client_error(),
+        "traversal path in create should be rejected (4xx): {}",
+        resp.status()
+    );
+
+    // POST rename with traversal in new_path.
+    let resp = post_json(
+        &c,
+        &format!("{base}/api/memory/memories/notes/real/rename"),
+        serde_json::json!({"new_path": "../escape/bad"}),
+    )
+    .await;
+    assert!(
+        resp.status().is_client_error(),
+        "traversal in rename new_path should return 4xx: {}",
+        resp.status()
+    );
+
+    handle.abort();
+    drop(tmp);
+}
+
+// ---------------------------------------------------------------------------
+// DW-1.11: Comprehensive status-code coverage for each route
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn test_dw_1_11_all_status_codes_per_route() {
+    let (tmp, sock, db, cfg, _, _g) = setup();
+    let brain_dir = cfg.brains[0].dir.clone();
+
+    fs::create_dir_all(brain_dir.join("notes")).unwrap();
+    fs::write(
+        brain_dir.join("notes/seed.md"),
+        "---\nname: seed\ndate: 2025-01-01\ntype: memory\n---\n\nseed body",
+    )
+    .unwrap();
+
+    let (handle, port) = start(sock, db, cfg).await;
+    tokio::time::sleep(Duration::from_millis(800)).await;
+
+    let base = format!("http://127.0.0.1:{port}");
+    let c = client();
+
+    let mem: Value = c
+        .get(format!("{base}/api/memory/memories/notes/seed"))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let etag: f64 = mem["mtime"].as_f64().expect("mtime field missing");
+
+    // PUT 200.
+    let resp = put_json(
+        &c,
+        &format!("{base}/api/memory/memories/notes/seed"),
+        serde_json::json!({"body": "updated", "frontmatter": "name: seed\ndate: 2025-01-01\ntype: memory"}),
+        Some(etag),
+    )
+    .await;
+    assert_eq!(resp.status(), 200, "PUT match -> 200");
+
+    // PUT 409 stale.
+    let resp = put_json(
+        &c,
+        &format!("{base}/api/memory/memories/notes/seed"),
+        serde_json::json!({"body": "stale attempt", "frontmatter": "name: seed\ndate: 2025-01-01\ntype: memory"}),
+        Some(0.0001),
+    )
+    .await;
+    assert_eq!(resp.status(), 409, "PUT stale -> 409");
+
+    // POST create 201.
+    let resp = post_json(
+        &c,
+        &format!("{base}/api/memory"),
+        serde_json::json!({"path": "notes/fresh", "body": "body", "frontmatter": "name: fresh\ndate: 2025-01-01\ntype: memory"}),
+    )
+    .await;
+    assert_eq!(resp.status(), 201, "POST create -> 201");
+
+    // POST create 409 duplicate.
+    let resp = post_json(
+        &c,
+        &format!("{base}/api/memory"),
+        serde_json::json!({"path": "notes/fresh", "body": "body2", "frontmatter": "name: fresh\ndate: 2025-01-01\ntype: memory"}),
+    )
+    .await;
+    assert_eq!(resp.status(), 409, "POST create duplicate -> 409");
+
+    // DELETE 204 success.
+    let resp = delete_json(&c, &format!("{base}/api/memory/memories/notes/fresh")).await;
+    assert_eq!(resp.status(), 204, "DELETE -> 204");
+
+    // DELETE 204 idempotent.
+    let resp = delete_json(&c, &format!("{base}/api/memory/memories/notes/fresh")).await;
+    assert_eq!(resp.status(), 204, "DELETE missing -> 204 idempotent");
+
+    // POST rename 200.
+    let resp = post_json(
+        &c,
+        &format!("{base}/api/memory/memories/notes/seed/rename"),
+        serde_json::json!({"new_path": "notes/seed-renamed"}),
+    )
+    .await;
+    assert_eq!(resp.status(), 200, "rename -> 200");
+
+    // POST rename 404 (source gone after rename).
+    let resp = post_json(
+        &c,
+        &format!("{base}/api/memory/memories/notes/seed/rename"),
+        serde_json::json!({"new_path": "notes/seed-again"}),
+    )
+    .await;
+    assert_eq!(resp.status(), 404, "rename nonexistent -> 404");
+
+    handle.abort();
+    drop(tmp);
+}

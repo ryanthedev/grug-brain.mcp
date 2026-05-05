@@ -17,7 +17,7 @@ use crate::tools::search::search_all;
 use crate::tools::similarity::find_similar;
 use crate::tools::GrugDb;
 use axum::extract::{Path, Query, State};
-use axum::http::StatusCode;
+use axum::http::{HeaderMap, StatusCode};
 use axum::response::IntoResponse;
 use axum::Json;
 use serde::Deserialize;
@@ -164,12 +164,205 @@ pub async fn healthz(
     Ok(Json(v))
 }
 
-/// Mutating-route placeholder. Plan 2 will replace this with real write
-/// endpoints. The CSRF middleware will already have rejected the request if
-/// the `X-Grug-Client: web` header is missing, so reaching this body means
-/// the header was present.
+/// Mutating-route placeholder (kept for backward compat with existing CSRF tests).
 pub async fn csrf_probe() -> impl IntoResponse {
     (StatusCode::OK, Json(json!({"ok": true})))
+}
+
+// ---------------------------------------------------------------------------
+// Write handlers (Plan 2 Phase 1)
+// ---------------------------------------------------------------------------
+
+/// Request body for PUT /api/memory/:brain/:category/:path
+#[derive(Debug, Deserialize)]
+pub struct MemoryWriteBody {
+    pub body: String,
+    pub frontmatter: Option<String>,
+}
+
+/// PUT /api/memory/:brain/:category/:path
+/// Updates an existing memory. Requires `If-Match: <etag>` header (mtime f64).
+/// Returns 200 + {ok, etag} on success, 409 + ConflictResponse on ETag mismatch,
+/// 403 on read-only brain.
+pub async fn memory_write(
+    State(state): State<Arc<AppState>>,
+    Path((brain, category, path)): Path<(String, String, String)>,
+    headers: HeaderMap,
+    Json(body): Json<MemoryWriteBody>,
+) -> Result<impl IntoResponse, ApiError> {
+    validate_memory_path(&category).map_err(ApiError::bad_request)?;
+    validate_memory_path(&path).map_err(ApiError::bad_request)?;
+
+    let if_match: f64 = headers
+        .get("if-match")
+        .and_then(|v| v.to_str().ok())
+        .and_then(|s| s.parse::<f64>().ok())
+        .ok_or_else(|| ApiError::bad_request("If-Match header required (ETag as f64)"))?;
+
+    let rel_path = format!("{category}/{path}");
+
+    let v = call_db(
+        &state.db_tx,
+        "__http/memory_write",
+        json!({
+            "brain": brain,
+            "rel_path": rel_path,
+            "body": body.body,
+            "frontmatter": body.frontmatter,
+            "if_match_etag": if_match,
+            "attempted_body": body.body,
+        }),
+    )
+    .await?;
+
+    if let Some(err) = v.get("error").and_then(|e| e.as_str()) {
+        if err == "conflict" {
+            return Ok((StatusCode::CONFLICT, Json(v)).into_response());
+        }
+        if err == "read-only brain" {
+            return Ok((StatusCode::FORBIDDEN, Json(v)).into_response());
+        }
+        if err == "not found" {
+            return Ok((StatusCode::NOT_FOUND, Json(v)).into_response());
+        }
+    }
+
+    Ok((StatusCode::OK, Json(v)).into_response())
+}
+
+/// Request body for POST /api/memory (create)
+#[derive(Debug, Deserialize)]
+pub struct MemoryCreateBody {
+    pub path: String,
+    pub body: String,
+    pub frontmatter: Option<String>,
+    /// Optional brain name. Defaults to the primary brain.
+    pub brain: Option<String>,
+}
+
+/// POST /api/memory
+/// Creates a new memory. Returns 201 + {path, etag} on success, 409 if
+/// the path already exists, 403 on read-only brain.
+pub async fn memory_create(
+    State(state): State<Arc<AppState>>,
+    Json(body): Json<MemoryCreateBody>,
+) -> Result<impl IntoResponse, ApiError> {
+    // Validate the path field from the request body.
+    // Split on '/' to validate both the category and name parts.
+    let parts: Vec<&str> = body.path.splitn(2, '/').collect();
+    let (cat, name) = if parts.len() == 2 {
+        (parts[0], parts[1])
+    } else {
+        return Err(ApiError::bad_request("path must be in format 'category/name'"));
+    };
+    validate_memory_path(cat).map_err(ApiError::bad_request)?;
+    validate_memory_path(name).map_err(ApiError::bad_request)?;
+
+    let v = call_db(
+        &state.db_tx,
+        "__http/memory_create",
+        json!({
+            "brain": body.brain,
+            "rel_path": body.path,
+            "body": body.body,
+            "frontmatter": body.frontmatter,
+        }),
+    )
+    .await?;
+
+    if let Some(err) = v.get("error").and_then(|e| e.as_str()) {
+        if err == "duplicate path" {
+            return Ok((StatusCode::CONFLICT, Json(v)).into_response());
+        }
+        if err == "read-only brain" {
+            return Ok((StatusCode::FORBIDDEN, Json(v)).into_response());
+        }
+    }
+
+    Ok((StatusCode::CREATED, Json(v)).into_response())
+}
+
+/// DELETE /api/memory/:brain/:category/:path
+/// Deletes the memory. Returns 204 on success and 204 on missing (idempotent).
+/// Returns 403 on read-only brain.
+pub async fn memory_delete(
+    State(state): State<Arc<AppState>>,
+    Path((brain, category, path)): Path<(String, String, String)>,
+) -> Result<impl IntoResponse, ApiError> {
+    validate_memory_path(&category).map_err(ApiError::bad_request)?;
+    validate_memory_path(&path).map_err(ApiError::bad_request)?;
+
+    let rel_path = format!("{category}/{path}");
+
+    let v = call_db(
+        &state.db_tx,
+        "__http/memory_delete",
+        json!({"brain": brain, "rel_path": rel_path}),
+    )
+    .await?;
+
+    if let Some(err) = v.get("error").and_then(|e| e.as_str()) {
+        if err == "read-only brain" {
+            return Ok((StatusCode::FORBIDDEN, Json(v)).into_response());
+        }
+    }
+
+    // Idempotent: return 204 whether the file existed or not.
+    Ok((StatusCode::NO_CONTENT, ()).into_response())
+}
+
+/// Request body for POST /api/memory/:brain/:category/:path/rename
+#[derive(Debug, Deserialize)]
+pub struct MemoryRenameBody {
+    pub new_path: String,
+}
+
+/// POST /api/memory/:brain/:category/:path/rename
+/// Renames the memory (no link rewrite). Returns 200 + {path, etag}.
+pub async fn memory_rename(
+    State(state): State<Arc<AppState>>,
+    Path((brain, category, path)): Path<(String, String, String)>,
+    Json(body): Json<MemoryRenameBody>,
+) -> Result<impl IntoResponse, ApiError> {
+    validate_memory_path(&category).map_err(ApiError::bad_request)?;
+    validate_memory_path(&path).map_err(ApiError::bad_request)?;
+
+    // Validate new_path parts.
+    let parts: Vec<&str> = body.new_path.splitn(2, '/').collect();
+    let (new_cat, new_name) = if parts.len() == 2 {
+        (parts[0], parts[1])
+    } else {
+        return Err(ApiError::bad_request("new_path must be in format 'category/name'"));
+    };
+    validate_memory_path(new_cat).map_err(ApiError::bad_request)?;
+    validate_memory_path(new_name).map_err(ApiError::bad_request)?;
+
+    let old_rel = format!("{category}/{path}");
+
+    let v = call_db(
+        &state.db_tx,
+        "__http/memory_rename",
+        json!({
+            "brain": brain,
+            "old_rel_path": old_rel,
+            "new_rel_path": body.new_path,
+        }),
+    )
+    .await?;
+
+    if let Some(err) = v.get("error").and_then(|e| e.as_str()) {
+        if err == "read-only brain" {
+            return Ok((StatusCode::FORBIDDEN, Json(v)).into_response());
+        }
+        if err == "not found" {
+            return Ok((StatusCode::NOT_FOUND, Json(v)).into_response());
+        }
+        if err == "destination exists" {
+            return Ok((StatusCode::CONFLICT, Json(v)).into_response());
+        }
+    }
+
+    Ok((StatusCode::OK, Json(v)).into_response())
 }
 
 // ---------------------------------------------------------------------------
@@ -192,6 +385,18 @@ impl ApiError {
     pub fn not_found(msg: impl Into<String>) -> Self {
         Self {
             status: StatusCode::NOT_FOUND,
+            message: msg.into(),
+        }
+    }
+    pub fn forbidden(msg: impl Into<String>) -> Self {
+        Self {
+            status: StatusCode::FORBIDDEN,
+            message: msg.into(),
+        }
+    }
+    pub fn conflict(msg: impl Into<String>) -> Self {
+        Self {
+            status: StatusCode::CONFLICT,
             message: msg.into(),
         }
     }
@@ -549,4 +754,255 @@ pub fn healthz_json(db: &mut GrugDb) -> Result<String, String> {
         "brains": brains,
     });
     serde_json::to_string(&v).map_err(|e| e.to_string())
+}
+
+// ---------------------------------------------------------------------------
+// DB-worker side: write-path JSON producers (Plan 2 Phase 1)
+// ---------------------------------------------------------------------------
+
+/// Split a relative path `"category/name"` or `"category/name.md"` into
+/// `(category, stem)` where stem has no `.md` extension. Returns Err if the
+/// format is invalid.
+fn split_rel_path(rel_path: &str) -> Result<(String, String), String> {
+    // Strip .md extension if present.
+    let stripped = rel_path.strip_suffix(".md").unwrap_or(rel_path);
+    // Split on the LAST '/' to handle nested category-like paths gracefully.
+    if let Some(pos) = stripped.rfind('/') {
+        let cat = stripped[..pos].to_string();
+        let name = stripped[pos + 1..].to_string();
+        if cat.is_empty() || name.is_empty() {
+            return Err(format!("invalid path: {rel_path:?}"));
+        }
+        Ok((cat, name))
+    } else {
+        Err(format!("path must be 'category/name', got: {rel_path:?}"))
+    }
+}
+
+/// Read the current mtime for a path from the `files` table.
+fn read_mtime(db: &mut GrugDb, brain_name: &str, rel_path: &str) -> f64 {
+    db.conn()
+        .query_row(
+            "SELECT mtime FROM files WHERE brain = ?1 AND path = ?2",
+            rusqlite::params![brain_name, rel_path],
+            |row| row.get(0),
+        )
+        .unwrap_or(0.0)
+}
+
+/// `__http/memory_write`: update an existing memory via PUT with ETag.
+///
+/// Returns `{ok, etag}` on success, or an error object for conflict/readonly/notfound.
+pub fn memory_write_json(
+    db: &mut GrugDb,
+    brain_name: &str,
+    rel_path: &str,
+    body: &str,
+    frontmatter: Option<&str>,
+    if_match_etag: f64,
+    attempted_body: &str,
+) -> Result<String, String> {
+    db.maybe_reload_config();
+    let brain = db.resolve_brain(Some(brain_name))?.clone();
+
+    if !brain.writable {
+        let v = json!({"error": "read-only brain", "brain": brain.name});
+        return Ok(serde_json::to_string(&v).map_err(|e| e.to_string())?);
+    }
+
+    let (category, stem) = split_rel_path(rel_path)?;
+    validate_memory_path(&category)?;
+    validate_memory_path(&stem)?;
+
+    // Build the full file content.
+    let file_content = if let Some(fm) = frontmatter {
+        if fm.trim().is_empty() {
+            body.to_string()
+        } else {
+            format!("---\n{}\n---\n\n{}", fm.trim_end(), body)
+        }
+    } else {
+        body.to_string()
+    };
+
+    // Assemble canonical path for existence check.
+    let canonical_rel = format!("{category}/{stem}.md");
+    let file_path = brain.dir.join(&category).join(format!("{stem}.md"));
+
+    if !file_path.exists() {
+        let v = json!({"error": "not found", "path": canonical_rel});
+        return Ok(serde_json::to_string(&v).map_err(|e| e.to_string())?);
+    }
+
+    // grug_write handles ETag conflict check + atomic write + indexing.
+    let result = crate::tools::write::grug_write(
+        db,
+        &category,
+        &stem,
+        &file_content,
+        Some(brain_name),
+        Some(if_match_etag),
+    );
+
+    match result {
+        Err(conflict_json) => {
+            // Parse grug_write's internal conflict shape and reshape for HTTP.
+            let inner: Value =
+                serde_json::from_str(&conflict_json).unwrap_or(json!({"error": "conflict"}));
+            let current_etag = inner.get("current_mtime").and_then(|v| v.as_f64()).unwrap_or(0.0);
+            let current_body = inner
+                .get("current_content")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string();
+            let v = json!({
+                "error": "conflict",
+                "current_etag": current_etag,
+                "current_body": current_body,
+                "attempted_body": attempted_body,
+            });
+            Ok(serde_json::to_string(&v).map_err(|e| e.to_string())?)
+        }
+        Ok(_) => {
+            let new_mtime = read_mtime(db, &brain.name, &canonical_rel);
+            let v = json!({"ok": true, "etag": new_mtime});
+            Ok(serde_json::to_string(&v).map_err(|e| e.to_string())?)
+        }
+    }
+}
+
+/// `__http/memory_create`: create a new memory via POST.
+///
+/// Returns `{path, etag}` on 201, or error object for duplicate/readonly.
+pub fn memory_create_json(
+    db: &mut GrugDb,
+    brain_name: Option<&str>,
+    rel_path: &str,
+    body: &str,
+    frontmatter: Option<&str>,
+) -> Result<String, String> {
+    db.maybe_reload_config();
+    let brain = db.resolve_brain(brain_name)?.clone();
+
+    if !brain.writable {
+        let v = json!({"error": "read-only brain", "brain": brain.name});
+        return Ok(serde_json::to_string(&v).map_err(|e| e.to_string())?);
+    }
+
+    let (category, stem) = split_rel_path(rel_path)?;
+    validate_memory_path(&category)?;
+    validate_memory_path(&stem)?;
+
+    // Check for duplicate before calling write.
+    let canonical_rel = format!("{category}/{stem}.md");
+    let file_path = brain.dir.join(&category).join(format!("{stem}.md"));
+    if file_path.exists() {
+        let v = json!({"error": "duplicate path", "path": canonical_rel});
+        return Ok(serde_json::to_string(&v).map_err(|e| e.to_string())?);
+    }
+
+    let file_content = if let Some(fm) = frontmatter {
+        if fm.trim().is_empty() {
+            body.to_string()
+        } else {
+            format!("---\n{}\n---\n\n{}", fm.trim_end(), body)
+        }
+    } else {
+        body.to_string()
+    };
+
+    // No ETag for create (new file).
+    crate::tools::write::grug_write(
+        db,
+        &category,
+        &stem,
+        &file_content,
+        Some(&brain.name),
+        None,
+    )?;
+
+    let new_mtime = read_mtime(db, &brain.name, &canonical_rel);
+    let v = json!({"path": canonical_rel, "etag": new_mtime});
+    Ok(serde_json::to_string(&v).map_err(|e| e.to_string())?)
+}
+
+/// `__http/memory_delete`: delete a memory via DELETE.
+///
+/// Returns `{ok: true}` always (idempotent: missing file is not an error).
+pub fn memory_delete_json(
+    db: &mut GrugDb,
+    brain_name: &str,
+    rel_path: &str,
+) -> Result<String, String> {
+    db.maybe_reload_config();
+    let brain = db.resolve_brain(Some(brain_name))?.clone();
+
+    if !brain.writable {
+        let v = json!({"error": "read-only brain", "brain": brain.name});
+        return Ok(serde_json::to_string(&v).map_err(|e| e.to_string())?);
+    }
+
+    let (category, stem) = split_rel_path(rel_path)?;
+    validate_memory_path(&category)?;
+    validate_memory_path(&stem)?;
+
+    // grug_delete returns Ok("not found: ...") for missing files — that's fine
+    // for DELETE idempotency. Hard=false (soft delete to .trash/).
+    crate::tools::delete::grug_delete(db, &category, &stem, Some(brain_name), false)
+        .map(|_| serde_json::to_string(&json!({"ok": true})).unwrap())
+}
+
+/// `__http/memory_rename`: rename a memory via POST .../rename.
+///
+/// Returns `{path, etag}` on success, or error object for readonly/notfound/duplicate.
+pub fn memory_rename_json(
+    db: &mut GrugDb,
+    brain_name: &str,
+    old_rel_path: &str,
+    new_rel_path: &str,
+) -> Result<String, String> {
+    db.maybe_reload_config();
+    let brain = db.resolve_brain(Some(brain_name))?.clone();
+
+    if !brain.writable {
+        let v = json!({"error": "read-only brain", "brain": brain.name});
+        return Ok(serde_json::to_string(&v).map_err(|e| e.to_string())?);
+    }
+
+    let (old_cat, old_stem) = split_rel_path(old_rel_path)?;
+    let (new_cat, new_stem) = split_rel_path(new_rel_path)?;
+    validate_memory_path(&old_cat)?;
+    validate_memory_path(&old_stem)?;
+    validate_memory_path(&new_cat)?;
+    validate_memory_path(&new_stem)?;
+
+    let result = crate::tools::write::grug_rename(
+        db,
+        &old_cat,
+        &old_stem,
+        &new_cat,
+        &new_stem,
+        Some(brain_name),
+    );
+
+    match result {
+        Err(e) => {
+            // grug_rename returns Err for "source not found" and "destination already exists".
+            let (err_kind, msg) = if e.contains("source not found") {
+                ("not found", e.clone())
+            } else if e.contains("destination already exists") {
+                ("destination exists", e.clone())
+            } else {
+                ("error", e.clone())
+            };
+            let v = json!({"error": err_kind, "message": msg});
+            Ok(serde_json::to_string(&v).map_err(|e| e.to_string())?)
+        }
+        Ok(_) => {
+            let new_canonical = format!("{new_cat}/{new_stem}.md");
+            let new_mtime = read_mtime(db, &brain.name, &new_canonical);
+            let v = json!({"path": new_canonical, "etag": new_mtime});
+            Ok(serde_json::to_string(&v).map_err(|e| e.to_string())?)
+        }
+    }
 }

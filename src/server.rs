@@ -223,6 +223,45 @@ fn dispatch_tool(db: &mut GrugDb, tool: &str, params: &Value) -> Result<String, 
             crate::http::handlers::quickswitch_json(db, q)
         }
         "__http/healthz" => crate::http::handlers::healthz_json(db),
+        // Write-path routes (Plan 2 Phase 1).
+        "__http/memory_write" => {
+            let brain = extract_str(params, "brain").ok_or("missing field: brain")?;
+            let rel_path = extract_str(params, "rel_path").ok_or("missing field: rel_path")?;
+            let body = extract_str(params, "body").unwrap_or("");
+            let frontmatter = extract_str(params, "frontmatter");
+            let if_match_etag = params
+                .get("if_match_etag")
+                .and_then(|v| v.as_f64())
+                .ok_or("missing field: if_match_etag")?;
+            let attempted_body = extract_str(params, "attempted_body").unwrap_or(body);
+            crate::http::handlers::memory_write_json(
+                db,
+                brain,
+                rel_path,
+                body,
+                frontmatter,
+                if_match_etag,
+                attempted_body,
+            )
+        }
+        "__http/memory_create" => {
+            let brain = extract_str(params, "brain");
+            let rel_path = extract_str(params, "rel_path").ok_or("missing field: rel_path")?;
+            let body = extract_str(params, "body").unwrap_or("");
+            let frontmatter = extract_str(params, "frontmatter");
+            crate::http::handlers::memory_create_json(db, brain, rel_path, body, frontmatter)
+        }
+        "__http/memory_delete" => {
+            let brain = extract_str(params, "brain").ok_or("missing field: brain")?;
+            let rel_path = extract_str(params, "rel_path").ok_or("missing field: rel_path")?;
+            crate::http::handlers::memory_delete_json(db, brain, rel_path)
+        }
+        "__http/memory_rename" => {
+            let brain = extract_str(params, "brain").ok_or("missing field: brain")?;
+            let old_rel = extract_str(params, "old_rel_path").ok_or("missing field: old_rel_path")?;
+            let new_rel = extract_str(params, "new_rel_path").ok_or("missing field: new_rel_path")?;
+            crate::http::handlers::memory_rename_json(db, brain, old_rel, new_rel)
+        }
         _ => Err(format!("unknown tool: {tool}")),
     }
 }
