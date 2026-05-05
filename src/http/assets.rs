@@ -83,6 +83,7 @@ fn build_index() -> Vec<u8> {
         ("{{DOMPURIFY_HASH}}", "vendor/dompurify.min.js"),
         ("{{MARKED_HASH}}", "vendor/marked.min.js"),
         ("{{CODEMIRROR_HASH}}", "vendor/codemirror.min.js"),
+        ("{{JSDIFF_HASH}}", "vendor/jsdiff.min.js"),
         ("{{APP_JS_HASH}}", "app.js"),
     ];
 
@@ -154,6 +155,7 @@ mod tests {
         assert!(!html.contains("{{DOMPURIFY_HASH}}"), "DOMPURIFY_HASH placeholder not replaced");
         assert!(!html.contains("{{MARKED_HASH}}"), "MARKED_HASH placeholder not replaced");
         assert!(!html.contains("{{CODEMIRROR_HASH}}"), "CODEMIRROR_HASH placeholder not replaced");
+        assert!(!html.contains("{{JSDIFF_HASH}}"), "JSDIFF_HASH placeholder not replaced");
         // The rendered index should still contain grug-brain.
         assert!(html.contains("grug-brain"), "title should be present");
         // Asset URLs should contain ?v= with hash values.

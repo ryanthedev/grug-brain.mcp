@@ -67,6 +67,8 @@
       <div id="editor-toolbar" role="toolbar" aria-label="Editor controls">
         <button id="mode-toggle" type="button" aria-label="Toggle read/edit mode">edit</button>
         <span id="dirty-indicator" aria-label="Unsaved changes" hidden>● unsaved</span>
+        <button id="editor-rename" type="button" aria-label="Rename memory">Rename</button>
+        <button id="editor-delete" type="button" aria-label="Delete memory">Delete</button>
         <button id="editor-save" type="button" aria-label="Save memory">Save</button>
       </div>
 
@@ -100,6 +102,89 @@
         <!-- Populated by app.js render.preview() -->
       </div>
     </article>
+
+    <!-- ── Phase 5: Conflict modal ───────────────────────────────────────── -->
+    <div id="conflict-modal" class="grug-modal" role="dialog" aria-modal="true" aria-labelledby="conflict-title" hidden>
+      <div class="modal-backdrop"></div>
+      <div class="modal-body modal-body-wide">
+        <h2 id="conflict-title">Conflict — file changed on disk</h2>
+        <p class="modal-help">Your save was rejected because the file was modified by another writer.</p>
+        <div class="conflict-panes">
+          <section aria-label="Yours">
+            <h3>Yours</h3>
+            <pre id="conflict-yours" class="conflict-pane"></pre>
+          </section>
+          <section aria-label="Theirs">
+            <h3>Theirs</h3>
+            <pre id="conflict-theirs" class="conflict-pane"></pre>
+          </section>
+          <section aria-label="Merged preview">
+            <h3>Merged preview</h3>
+            <pre id="conflict-merged" class="conflict-pane conflict-diff"></pre>
+          </section>
+        </div>
+        <div class="modal-actions">
+          <button id="conflict-cancel" type="button">Cancel</button>
+          <button id="conflict-reload" type="button">Reload theirs</button>
+          <button id="conflict-overwrite" type="button">Overwrite</button>
+        </div>
+      </div>
+    </div>
+
+    <!-- ── Phase 5: Create-memory modal (first save of a draft) ──────────── -->
+    <div id="create-modal" class="grug-modal" role="dialog" aria-modal="true" aria-labelledby="create-title" hidden>
+      <div class="modal-backdrop"></div>
+      <div class="modal-body">
+        <h2 id="create-title">Name this memory</h2>
+        <p class="modal-help">Pick a filename — letters, digits, dashes, underscores.</p>
+        <div class="fm-row">
+          <label for="create-name">Name</label>
+          <input id="create-name" type="text" autocomplete="off" required aria-required="true">
+        </div>
+        <div class="modal-actions">
+          <button id="create-cancel" type="button">Cancel</button>
+          <button id="create-submit" type="button">Create</button>
+        </div>
+      </div>
+    </div>
+
+    <!-- ── Phase 5: Delete-memory modal (typed-name confirm) ─────────────── -->
+    <div id="delete-modal" class="grug-modal" role="dialog" aria-modal="true" aria-labelledby="delete-title" hidden>
+      <div class="modal-backdrop"></div>
+      <div class="modal-body">
+        <h2 id="delete-title">Delete memory</h2>
+        <p class="modal-help">Type <code id="delete-target-name"></code> to confirm.</p>
+        <div class="fm-row">
+          <label for="delete-confirm">Confirm</label>
+          <input id="delete-confirm" type="text" autocomplete="off" aria-describedby="delete-target-name">
+        </div>
+        <div class="modal-actions">
+          <button id="delete-cancel" type="button">Cancel</button>
+          <button id="delete-submit" type="button" disabled>Delete</button>
+        </div>
+      </div>
+    </div>
+
+    <!-- ── Phase 5: Rename-memory modal ──────────────────────────────────── -->
+    <div id="rename-modal" class="grug-modal" role="dialog" aria-modal="true" aria-labelledby="rename-title" hidden>
+      <div class="modal-backdrop"></div>
+      <div class="modal-body">
+        <h2 id="rename-title">Rename memory</h2>
+        <p class="modal-help">Path format: <code>category/name</code>.</p>
+        <div class="fm-row">
+          <label for="rename-new-path">New path</label>
+          <input id="rename-new-path" type="text" autocomplete="off" required>
+        </div>
+        <div class="fm-row">
+          <label for="rename-rewrite-links">Rewrite links</label>
+          <input id="rename-rewrite-links" type="checkbox" checked>
+        </div>
+        <div class="modal-actions">
+          <button id="rename-cancel" type="button">Cancel</button>
+          <button id="rename-submit" type="button">Rename</button>
+        </div>
+      </div>
+    </div>
 
     <!-- Unsaved-changes confirmation modal -->
     <div id="unsaved-modal" role="dialog" aria-modal="true" aria-labelledby="unsaved-title" hidden>
@@ -136,6 +221,7 @@
 <script src="/vendor/dompurify.min.js?v={{DOMPURIFY_HASH}}"></script>
 <script src="/vendor/marked.min.js?v={{MARKED_HASH}}"></script>
 <script src="/vendor/codemirror.min.js?v={{CODEMIRROR_HASH}}"></script>
+<script src="/vendor/jsdiff.min.js?v={{JSDIFF_HASH}}"></script>
 <script src="/app.js?v={{APP_JS_HASH}}"></script>
 
 </body>

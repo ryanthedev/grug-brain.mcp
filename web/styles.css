@@ -734,5 +734,137 @@ a:focus-visible,
   border-color: var(--error);
 }
 
+/* ── Plan 2 Phase 5: shared modal scaffold + CRUD + conflict UI ───────── */
+
+/* Generic modal applied to all Phase 5 modals. */
+.grug-modal {
+  position: fixed;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 1000;
+}
+.grug-modal[hidden] { display: none; }
+.grug-modal .modal-backdrop {
+  position: absolute;
+  inset: 0;
+  background: rgba(0,0,0,0.55);
+}
+.grug-modal .modal-body {
+  position: relative;
+  background: var(--bg-1);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 1rem 1.25rem;
+  max-width: 440px;
+  box-shadow: 0 8px 32px var(--shadow);
+}
+.grug-modal .modal-body-wide { max-width: 1100px; width: 92vw; }
+.grug-modal .modal-body h2 {
+  font-size: var(--text-lg);
+  margin-bottom: 0.5rem;
+}
+.grug-modal .modal-body .modal-help {
+  font-size: var(--text-sm);
+  color: var(--text-1);
+  margin-bottom: 0.75rem;
+}
+.grug-modal .modal-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 0.5rem;
+  margin-top: 1rem;
+}
+.grug-modal .modal-actions button {
+  padding: 0.4rem 0.9rem;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  background: var(--bg-2);
+  color: var(--text-0);
+}
+.grug-modal .modal-actions button[disabled] {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+.grug-modal .fm-row { margin: 0.4rem 0; }
+
+/* Conflict modal — three side-by-side panes. */
+.conflict-panes {
+  display: grid;
+  grid-template-columns: 1fr 1fr 1fr;
+  gap: 0.5rem;
+  max-height: 60vh;
+}
+.conflict-panes section { display: flex; flex-direction: column; min-width: 0; }
+.conflict-panes h3 {
+  font-size: var(--text-xs);
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  color: var(--text-muted);
+  font-weight: 600;
+  margin-bottom: 0.25rem;
+}
+.conflict-pane {
+  font-family: var(--font-mono);
+  font-size: var(--text-xs);
+  background: var(--bg-0);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  padding: 0.5rem;
+  overflow: auto;
+  white-space: pre-wrap;
+  word-break: break-word;
+  max-height: 56vh;
+  color: var(--text-0);
+}
+.conflict-diff .diff-add {
+  display: block;
+  background: rgba(158, 206, 106, 0.18); /* var(--success) tint */
+  color: var(--success);
+}
+.conflict-diff .diff-remove {
+  display: block;
+  background: rgba(247, 118, 142, 0.18); /* var(--error) tint */
+  color: var(--error);
+}
+.conflict-diff .diff-context { display: block; color: var(--text-1); }
+
+/* Per-category "+" button (DW-5.4 entry point). */
+.category-add {
+  margin-left: 4px;
+  font-size: var(--text-xs);
+  padding: 0 6px;
+  border-radius: 3px;
+  background: transparent;
+  color: var(--text-muted);
+  border: 1px solid transparent;
+}
+.category-add:hover {
+  background: var(--bg-hover);
+  color: var(--text-0);
+  border-color: var(--border);
+}
+
+/* Editor toolbar new buttons. */
+#editor-rename,
+#editor-delete {
+  padding: 0.35rem 0.75rem;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  background: var(--bg-2);
+  color: var(--text-0);
+  font-size: var(--text-sm);
+}
+#editor-rename:hover,
+#editor-delete:hover { background: var(--bg-hover); }
+#editor-delete { color: var(--error); }
+
+/* Success-variant toast (already styled inline; ensure border green). */
+.toast.toast-success {
+  border-color: var(--success);
+}
+.toast.toast-success .toast-title { color: var(--success); }
+
 /* Ensure [hidden] always wins over our id-based display rules. */
 [hidden] { display: none !important; }
