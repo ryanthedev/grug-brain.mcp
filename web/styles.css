@@ -556,3 +556,183 @@ a:focus-visible,
   }
   #sidebar { display: none; }
 }
+
+/* ── Plan 2 Phase 4: editor + frontmatter form ─────────── */
+
+#editor-toolbar {
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+  padding: 0.5rem 1rem;
+  border-bottom: 1px solid var(--border);
+  background: var(--bg-1);
+}
+
+#mode-toggle,
+#editor-save {
+  padding: 0.35rem 0.75rem;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  background: var(--bg-2);
+  color: var(--text-0);
+  font-size: var(--text-sm);
+}
+#mode-toggle:hover,
+#editor-save:hover { background: var(--bg-hover); }
+#editor-save[disabled] { opacity: 0.5; cursor: not-allowed; }
+
+#dirty-indicator {
+  color: var(--accent-warm);
+  font-size: var(--text-sm);
+  margin-left: auto;
+}
+#dirty-indicator[hidden] { display: none; }
+
+#frontmatter-form {
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+  padding: 0.75rem 1rem;
+  border-bottom: 1px solid var(--border);
+  background: var(--bg-1);
+}
+#frontmatter-form[hidden] { display: none; }
+
+.fm-row {
+  display: grid;
+  grid-template-columns: 110px 1fr;
+  align-items: center;
+  gap: 0.5rem;
+}
+.fm-row label {
+  font-size: var(--text-sm);
+  color: var(--text-1);
+}
+.fm-row input {
+  width: 100%;
+  padding: 0.35rem 0.5rem;
+  font: inherit;
+  font-size: var(--text-sm);
+  color: var(--text-0);
+  background: var(--bg-0);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+}
+.fm-row small {
+  grid-column: 2;
+  color: var(--text-muted);
+  font-size: var(--text-xs);
+}
+.fm-error {
+  grid-column: 2;
+  color: var(--error);
+  font-size: var(--text-xs);
+}
+.fm-error[hidden] { display: none; }
+
+#editor-host {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow: auto;
+  background: var(--bg-0);
+}
+#editor-host:empty { display: none; }
+
+/* CodeMirror visual integration with grug theme. */
+.cm-editor {
+  height: 100%;
+  font-family: var(--font-mono);
+  font-size: var(--text-sm);
+  background: var(--bg-0);
+  color: var(--text-0);
+}
+.cm-editor.cm-focused { outline: none; }
+.cm-content { padding: 0.75rem 1rem; caret-color: var(--accent); }
+.cm-gutters {
+  background: var(--bg-1);
+  color: var(--text-muted);
+  border-right: 1px solid var(--border);
+}
+.cm-activeLine { background: var(--bg-1); }
+.cm-activeLineGutter { background: var(--bg-2); }
+.cm-selectionBackground,
+.cm-content ::selection {
+  background: var(--accent) !important;
+  opacity: 0.3;
+}
+
+/* Wikilink + tag decorations. */
+.cm-wikilink {
+  color: var(--accent);
+  text-decoration: underline dotted;
+}
+.cm-tag {
+  color: var(--success);
+  font-weight: 600;
+}
+
+/* Read-only banner. */
+.readonly-banner {
+  margin: 1rem;
+  padding: 0.75rem 1rem;
+  background: var(--bg-2);
+  border: 1px solid var(--border);
+  border-left: 4px solid var(--accent-warm);
+  border-radius: 4px;
+  color: var(--text-0);
+  font-size: var(--text-sm);
+}
+
+/* Modal — used by unsaved-changes guard. */
+#unsaved-modal[hidden] { display: none; }
+#unsaved-modal {
+  position: fixed;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 1000;
+}
+#unsaved-modal .modal-backdrop {
+  position: absolute;
+  inset: 0;
+  background: rgba(0,0,0,0.55);
+}
+#unsaved-modal .modal-body {
+  position: relative;
+  background: var(--bg-1);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 1rem 1.25rem;
+  max-width: 440px;
+  box-shadow: 0 8px 32px var(--shadow);
+}
+#unsaved-modal .modal-body h2 {
+  font-size: var(--text-lg);
+  margin-bottom: 0.5rem;
+}
+#unsaved-modal .modal-body p {
+  font-size: var(--text-sm);
+  color: var(--text-1);
+  margin-bottom: 1rem;
+}
+#unsaved-modal .modal-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 0.5rem;
+}
+#unsaved-modal .modal-actions button {
+  padding: 0.4rem 0.9rem;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  background: var(--bg-2);
+  color: var(--text-0);
+}
+#unsaved-modal #unsaved-discard {
+  background: var(--error);
+  color: var(--bg-0);
+  border-color: var(--error);
+}
+
+/* Ensure [hidden] always wins over our id-based display rules. */
+[hidden] { display: none !important; }

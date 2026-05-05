@@ -60,12 +60,59 @@
       </ul>
     </aside>
 
-    <!-- Preview pane -->
+    <!-- Preview / editor pane -->
     <article id="preview-panel" aria-label="Memory preview">
+
+      <!-- Edit surface controls (mode toggle, dirty marker, save) -->
+      <div id="editor-toolbar" role="toolbar" aria-label="Editor controls">
+        <button id="mode-toggle" type="button" aria-label="Toggle read/edit mode">edit</button>
+        <span id="dirty-indicator" aria-label="Unsaved changes" hidden>● unsaved</span>
+        <button id="editor-save" type="button" aria-label="Save memory">Save</button>
+      </div>
+
+      <!-- Read-only banner replaces editor for read-only brains -->
+      <div id="readonly-banner-host" aria-live="polite"></div>
+
+      <!-- Frontmatter form (above CodeMirror in edit mode) -->
+      <form id="frontmatter-form" aria-label="Memory frontmatter" hidden>
+        <div class="fm-row">
+          <label for="fm-name">Name</label>
+          <input id="fm-name" type="text" autocomplete="off" required aria-required="true">
+          <span id="fm-name-error" class="fm-error" role="alert" hidden></span>
+        </div>
+        <div class="fm-row">
+          <label for="fm-description">Description</label>
+          <input id="fm-description" type="text" autocomplete="off">
+        </div>
+        <div class="fm-row">
+          <label for="fm-tags">Tags</label>
+          <input id="fm-tags" type="text" autocomplete="off"
+                 aria-describedby="fm-tags-help" data-tags-count="0">
+          <small id="fm-tags-help">Comma-separated.</small>
+        </div>
+      </form>
+
+      <!-- CodeMirror editor mounts here when mode === "edit" -->
+      <div id="editor-host" aria-label="Memory body editor"></div>
+
+      <!-- Read-mode markdown preview -->
       <div id="preview-content" aria-live="polite">
         <!-- Populated by app.js render.preview() -->
       </div>
     </article>
+
+    <!-- Unsaved-changes confirmation modal -->
+    <div id="unsaved-modal" role="dialog" aria-modal="true" aria-labelledby="unsaved-title" hidden>
+      <div class="modal-backdrop"></div>
+      <div class="modal-body">
+        <h2 id="unsaved-title">Unsaved changes</h2>
+        <p>You have unsaved edits. Discard them?</p>
+        <div class="modal-actions">
+          <button id="unsaved-cancel" type="button">Cancel</button>
+          <button id="unsaved-discard" type="button">Discard</button>
+        </div>
+      </div>
+    </div>
 
   </main>
 
@@ -88,6 +135,7 @@
 <script src="/vendor/sigma.min.js?v={{SIGMA_HASH}}"></script>
 <script src="/vendor/dompurify.min.js?v={{DOMPURIFY_HASH}}"></script>
 <script src="/vendor/marked.min.js?v={{MARKED_HASH}}"></script>
+<script src="/vendor/codemirror.min.js?v={{CODEMIRROR_HASH}}"></script>
 <script src="/app.js?v={{APP_JS_HASH}}"></script>
 
 </body>

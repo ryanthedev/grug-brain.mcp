@@ -89,6 +89,11 @@ test("dw-4.5: preview sanitizes script tags", async ({ page, grugServer }) => {
   await expect(scriptItem).toBeVisible({ timeout: 8000 });
   await scriptItem.click();
 
+  // Plan 2 Phase 4: opening a memory now mounts the editor by default. Toggle
+  // back to read mode so the markdown preview pane (the surface this test
+  // exercises) is visible.
+  await page.locator("#mode-toggle").click();
+
   // Wait for preview to load.
   await expect(page.locator("#preview-content")).not.toContainText("Select a memory", {
     timeout: 8000,

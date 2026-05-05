@@ -1,0 +1,24 @@
+{
+  "name": "grug-codemirror-bundle",
+  "version": "1.0.0",
+  "private": true,
+  "description": "One-shot rollup of CodeMirror 6 into a single IIFE bundle for grug-brain web/. Output committed to web/vendor/codemirror.min.js. Do NOT load from this directory at runtime.",
+  "type": "module",
+  "scripts": {
+    "bundle": "rollup -c rollup.config.mjs"
+  },
+  "dependencies": {
+    "@codemirror/state": "6.4.1",
+    "@codemirror/view": "6.26.3",
+    "@codemirror/commands": "6.5.0",
+    "@codemirror/language": "6.10.1",
+    "@codemirror/lang-markdown": "6.2.5",
+    "@codemirror/search": "6.5.6",
+    "codemirror": "6.0.1"
+  },
+  "devDependencies": {
+    "rollup": "4.18.0",
+    "@rollup/plugin-node-resolve": "15.2.3",
+    "@rollup/plugin-terser": "0.4.4"
+  }
+}
