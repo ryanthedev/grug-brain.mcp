@@ -1,80 +1,105 @@
-<!-- base-commit: d3af7c1 -->
-<!-- generated: 2026-04-16 -->
+<!-- base-commit: 74dc260 -->
+<!-- generated: 2026-05-04 -->
 
 # Code Standards — grug-brain
 
 ## Architecture
 
-Single-binary Rust MCP server. Entry point: `src/main.rs` → `src/client.rs` (MCP tool definitions) → `src/server.rs` (dispatch). All tool logic lives in `src/tools/*.rs` — one file per tool. Shared state via `GrugDb` (SQLite connection + `BrainConfig`).
+Single-binary Rust MCP server + in-process axum HTTP server + vanilla-JS web viewer.
+- `src/main.rs` → `src/client.rs` (MCP tool definitions) → `src/server.rs` (dispatch loop, owns the DB thread).
+- All tool logic in `src/tools/*.rs`, one file per tool. Shared state via `GrugDb`.
+- `src/http/` runs the read-only HTTP/SSE API beside the MCP socket. Handlers send `__http/*` requests through `db_tx` to the DB thread; never touch SQLite directly.
+- `web/` is vendored vanilla JS (no build step). Cytoscape/DOMPurify/marked are checked into `web/vendor/`. **Plan 2 swaps cytoscape → sigma.js** for the local graph view.
 
-Data flow: markdown files on disk → `indexing.rs` syncs to SQLite FTS5 → tools query FTS/files tables → results returned as formatted strings.
+Data flow: markdown files → `walker.rs` → `indexing.rs` → SQLite FTS5 → tools query → returned as formatted strings or JSON. Watcher (`src/watcher.rs`) notifies the server, which broadcasts to SSE subscribers.
 
 ## Naming
 
-- Tool files: `src/tools/{verb}.rs` (e.g., `search.rs`, `dream.rs`, `update.rs`)
+- Tool files: `src/tools/{verb}.rs` (e.g., `search.rs`, `dream.rs`, `write.rs`)
 - Public functions: `grug_{tool}(db: &mut GrugDb, ...)` pattern
-- Internal helpers: private `fn` in same file, no cross-tool imports except via `mod.rs` re-exports
-- Types: `src/types.rs` — shared structs (`Brain`, `BrainConfig`, `FtsRow`, `SearchResult`, `RecallRow`, `Memory`)
-- Test helpers: `src/tools/mod.rs::test_helpers` module
+- HTTP handlers: short verb names in `src/http/handlers.rs` (`brains`, `memories`, `preview`, `healthz`)
+- DB-thread routes: `__http/{name}` matching the handler
+- Test helpers: `src/tools/mod.rs::test_helpers`
+- Frontend modules: lowercase namespaces inside the IIFE (`api`, `state`, `render`, `router`, `sse`, `graph`, `toast`, `theme`)
 
 ## Imports
 
 - `use super::GrugDb` in tool files for the shared db wrapper
 - `use crate::types::*` for shared types
 - `rusqlite::params!` macro for parameterized queries
-- No external HTTP/network dependencies — everything is local SQLite
+- HTTP handlers go through `call_db(&state.db_tx, "__http/route", payload)` — no direct SQLite access
+- Frontend: no module bundler. Everything is one IIFE in `web/app.js`. Vendor libs loaded via `<script>` in `web/index.html`.
 
 ## Error Handling
 
-- Tool functions return `Result<String, String>` — Ok for user-facing messages, Err for failures
-- "Not found" conditions return `Ok("not found: ...")` not `Err` (matching user-facing convention)
-- Read-only brain → `Ok("brain \"...\" is read-only")`
-- Database errors → `.map_err(|e| format!("context: {e}"))`
+**Rust tools:** return `Result<String, String>` — Ok = user-facing message, Err = failure. "Not found" → `Ok("not found: ...")` not Err. Read-only brain → `Ok("brain \"...\" is read-only")`. DB errors → `.map_err(|e| format!("context: {e}"))`.
+
+**HTTP handlers:** return `Result<Json<Value>, ApiError>`. `ApiError::internal`/`bad_request`/`not_found` produce structured JSON. Path traversal etc. validated via `helpers::validate_memory_path`.
+
+**Frontend:** every `api.*` call returns `{ok, data, error}` — never throws. Render layer checks `ok` and routes failures to `toast.error()`. User-controlled data goes through `escapeHtml()` or `textContent`; markdown body goes through `DOMPurify.sanitize()` before any innerHTML assignment.
 
 ## File Organization
 
 ```
 src/
-  main.rs          — CLI + MCP server bootstrap
-  client.rs        — #[tool] MCP method definitions + param structs
-  server.rs        — JSON-RPC dispatch
-  config.rs        — brains.json loading
-  db.rs            — SQLite schema init (version 6)
-  parsing.rs       — frontmatter/body extraction
-  types.rs         — shared structs
+  main.rs / client.rs / server.rs / config.rs / db.rs / parsing.rs
+  helpers.rs       — path validation, frontmatter assembly
   walker.rs        — filesystem walking
+  watcher.rs       — notify-rs file watcher → broadcast channel
+  types.rs         — shared structs
   tools/
-    mod.rs         — GrugDb struct + test_helpers
-    {tool}.rs      — one per MCP tool
+    mod.rs         — GrugDb + test_helpers
+    {tool}.rs
+  http/
+    mod.rs         — AppState, router, listen
+    handlers.rs    — axum handlers + DB-thread JSON producers
+    security.rs    — Host/CORS/CSRF/CSP middleware
+    sse.rs         — SSE channel
+    assets.rs      — rust-embed for web/ + content-hash
+web/
+  index.html / app.js / styles.css
+  vendor/          — cytoscape, dompurify, marked (vendored, not npm)
+tests/
+  http_integration.rs / socket_integration.rs
+  playwright/      — Playwright suite (one spec per DW item)
 ```
 
 ## Testing
 
-- Every tool file has `#[cfg(test)] mod tests` at bottom
-- `test_helpers::test_db()` creates temp dir + in-memory-like SQLite
-- `test_helpers::test_db_multi()` for multi-brain tests
-- `create_brain_file()` helper for writing test fixtures
-- Tests use `tempfile::TempDir` for isolation
-- Pattern: create brain file → index → exercise tool → assert output string
+**Rust:** every tool file has `#[cfg(test)] mod tests`. Use `test_helpers::test_db()` (single brain) or `test_db_multi()` (multi). `create_brain_file()` writes fixtures. Tests use `tempfile::TempDir`. Pattern: create file → index → exercise → assert string.
+
+**HTTP integration:** `tests/http_integration.rs` spins up the full axum server against a temp brain. Reuse this harness for new endpoints; don't mock the DB layer.
+
+**Playwright:** one test per Done-When item, named `dw-N.M: …`. `tests/playwright/fixtures.js` provides the `grugServer` fixture (boots a release binary against a fixture brain on a free port, sets `GRUG_DB`). Use `await expect(locator).toHaveAttribute("aria-pressed", "true")` etc. — prefer a11y selectors over CSS. Run with `make test-playwright`.
+
+**Property tests** (Plan 2): use `proptest` for write-path invariants (path validation, frontmatter round-trip, ETag conflict resolution).
 
 ## Technology Decisions
 
-- SQLite FTS5 with porter stemming for full-text search (schema version 6)
-- BM25 ranking (FTS5 built-in) for search relevance
-- WAL journal mode for concurrent reads
-- Schema versioned in `meta` table -- drop-and-recreate on version mismatch (current: version 6)
-- No ORM — raw SQL via rusqlite
-- `schemars` for JSON Schema generation (MCP param validation)
-- `rmcp` crate for MCP transport
+- SQLite FTS5 + porter stemming + BM25; WAL mode; schema versioned in `meta` (current: 8) — drop-and-recreate on mismatch.
+- `rmcp` for MCP transport; UDS socket beside the HTTP listener.
+- `axum` 0.7 with tower middleware; Host/CORS/CSRF/CSP enforced on every request.
+- `notify` for the file watcher → `tokio::sync::broadcast` for fan-out → SSE.
+- `rust-embed` ships `web/` into the binary; FNV-1a content-hash for cache-busting (`?v=hash`).
+- Frontend has no build step. Vendor JS libs live in `web/vendor/` and are committed. Adding a dep = vendoring a minified file + size note in the PR.
+- **Plan 2:** sigma.js replaces cytoscape for the graph view. Vendor the UMD build into `web/vendor/sigma.min.js`; remove `cytoscape.min.js` once the migration lands.
+- CodeMirror 6 (Plan 2): vendor as a single rolled-up bundle. Don't introduce npm at the frontend root.
 
 ## Forbidden Patterns
 
-- No direct filesystem access to brain dirs from tool code — always go through indexing.rs
-- No `.unwrap()` on user-facing paths — always map_err or handle gracefully
-- No external network calls from tool functions
+- **No direct SQLite access from HTTP handlers** — always go through `db_tx` + `__http/*` routes. The DB thread is single-writer; bypassing it races.
+- **No raw `innerHTML` from user data.** Use `textContent` or `escapeHtml()`. Markdown body MUST go through DOMPurify with the existing allowlist.
+- **No `.unwrap()` on user paths.** Always `map_err` or handle gracefully. `validate_memory_path` for anything that touches the filesystem.
+- **No external network calls** from tool code or handlers. Everything is local.
+- **No npm/bundler at the frontend root.** Vendor or write it yourself. Playwright's `tests/playwright/package.json` is the only frontend npm tree.
+- **No new web/ files without DW coverage.** Every new UI surface needs at least one `dw-N.M` Playwright spec + axe-core check.
 
 ## Similar Implementations
 
-- Cross-links: `dream.rs:123-216` — FTS-based keyword matching across memories
-- Search: `search.rs` — FTS5 queries with BM25 ranking, pagination
-- Indexing: `indexing.rs` — disk → SQLite sync with mtime diffing
+- HTTP handler + DB route pair: `src/http/handlers.rs::preview` ↔ `preview_json` (DB-thread side) — copy this shape for new endpoints.
+- Write-path with ETag: `src/tools/write.rs` (Plan 1 Phase 1 hardening; mtime-based ETag, conflict returns Err).
+- Watcher → SSE fan-out: `src/watcher.rs` + `src/http/sse.rs`.
+- Frontend pub-sub: `web/app.js` `state` IIFE + `state.subscribe(render)`.
+- Graph render (will be replaced): `web/app.js` `graph.*` namespace — extract the data-shape contract before swapping to sigma.
+- Cross-links: `dream.rs:123-216` — FTS-based keyword matching.
+- Search: `search.rs` — FTS5 + BM25 + pagination.
