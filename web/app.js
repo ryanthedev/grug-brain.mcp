@@ -906,12 +906,13 @@
     }
 
     function assemble(fm) {
-      const lines = ["---"];
+      // The server wraps the returned string in "---\n...\n---\n\n" itself,
+      // so this function must return raw key-value lines only — no delimiters.
+      const lines = [];
       if (fm.name) lines.push("name: " + fm.name);
       if (fm.description) lines.push("description: " + fm.description);
       if (fm.tags && fm.tags.length) lines.push("tags: " + fm.tags.join(", "));
-      lines.push("---");
-      return lines.join("\n") + "\n";
+      return lines.join("\n");
     }
 
     function wire() {
@@ -1152,6 +1153,7 @@
 
   const nav = (() => {
     let pendingResolve = null;
+    let unsavedHandle = null;
 
     function init() {
       window.addEventListener("beforeunload", e => {
@@ -1164,25 +1166,25 @@
       const discard = document.getElementById("unsaved-discard");
       if (cancel) cancel.addEventListener("click", () => closeModal(false));
       if (discard) discard.addEventListener("click", () => closeModal(true));
-      document.addEventListener("keydown", e => {
-        const modal = document.getElementById("unsaved-modal");
-        if (e.key === "Escape" && modal && !modal.hidden) closeModal(false);
-      });
     }
 
     function closeModal(result) {
-      const modal = document.getElementById("unsaved-modal");
-      if (modal) modal.hidden = true;
+      // Delegate to modal.open handle so prior-focus is restored.
+      if (unsavedHandle) { unsavedHandle.close(); unsavedHandle = null; }
       if (pendingResolve) { pendingResolve(result); pendingResolve = null; }
     }
 
     function guard() {
       if (!state.get().dirty) return Promise.resolve(true);
-      const modal = document.getElementById("unsaved-modal");
-      if (!modal) return Promise.resolve(true);
-      modal.hidden = false;
+      const el = document.getElementById("unsaved-modal");
+      if (!el) return Promise.resolve(true);
       const cancel = document.getElementById("unsaved-cancel");
-      if (cancel) cancel.focus();
+      // Use the generic modal helper so focus-trap + Escape + prior-focus restore
+      // all work consistently with every other modal surface (DW-7.5).
+      unsavedHandle = modal.open(el, {
+        focusTarget: cancel,
+        onEscape: () => closeModal(false),
+      });
       return new Promise(res => { pendingResolve = res; });
     }
 
@@ -1601,6 +1603,8 @@
       const filename = memPath.replace(/^[^/]+\//, "").replace(/\.md$/, "");
       const url = `/api/memory/${encodeURIComponent(s.activeBrain)}/${encodeURIComponent(mem.category)}/${encodeURIComponent(filename)}/rename?rewrite_links=${rewrite ? "true" : "false"}`;
       const resp = await api.post(url, { new_path: newPath });
+      // Test-surface: expose last rename response for Playwright assertions.
+      window.__lastRenameResponse = resp.data;
       closeRename();
       if (!resp.ok) {
         toast.show(resp.error || "Rename failed");

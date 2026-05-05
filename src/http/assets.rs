@@ -19,6 +19,7 @@ use std::sync::OnceLock;
 
 #[derive(RustEmbed)]
 #[folder = "web/"]
+#[exclude = "build/*"]
 struct WebAssets;
 
 /// Cached rendered `index.html` with hash placeholders resolved.

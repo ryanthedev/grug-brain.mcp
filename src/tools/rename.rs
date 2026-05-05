@@ -947,6 +947,69 @@ mod tests {
         assert_eq!(new_target, 1, "src now targets new path");
     }
 
+    // ----- DW-7.7 regression: extra_name form after rename must resolve in DB -----
+
+    #[test]
+    fn test_dw_7_7_extra_name_backlink_resolves_after_rename() {
+        let _g = INJECT_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let (mut db, _tmp) = test_db();
+
+        // Target file has frontmatter `name: Hello World` (not the slug).
+        grug_write(
+            &mut db,
+            "notes",
+            "hello",
+            "---\nname: Hello World\ndate: 2025-01-01\ndescription: A greeting\n---\n\n# Hello World\n",
+            None,
+            None,
+        )
+        .unwrap();
+
+        // Source links via the frontmatter name (not slug).
+        grug_write(
+            &mut db,
+            "notes",
+            "source",
+            "---\nname: source\ndate: 2025-01-01\ntype: memory\n---\n\nsee [[Hello World]] for details",
+            None,
+            None,
+        )
+        .unwrap();
+
+        // Verify pre-rename state: source.md → hello.md exists in links.
+        let pre_count: i32 = db.conn().query_row(
+            "SELECT COUNT(*) FROM links WHERE src_path = 'notes/source.md' AND target_path = 'notes/hello.md'",
+            [],
+            |row| row.get(0),
+        ).unwrap();
+        assert_eq!(pre_count, 1, "source.md should link to hello.md before rename");
+
+        // Rename hello → hello-renamed (with link rewrite).
+        grug_rename_with_links(
+            &mut db,
+            "notes", "hello",
+            "notes", "hello-renamed",
+            None,
+            true,
+        ).unwrap();
+
+        // Post-rename: source.md should link to hello-renamed.md.
+        let new_count: i32 = db.conn().query_row(
+            "SELECT COUNT(*) FROM links WHERE src_path = 'notes/source.md' AND target_path = 'notes/hello-renamed.md'",
+            [],
+            |row| row.get(0),
+        ).unwrap();
+        assert_eq!(new_count, 1, "source.md should link to hello-renamed.md after rename");
+
+        // Old link should be gone.
+        let stale: i32 = db.conn().query_row(
+            "SELECT COUNT(*) FROM links WHERE target_path = 'notes/hello.md'",
+            [],
+            |row| row.get(0),
+        ).unwrap();
+        assert_eq!(stale, 0, "no stale links pointing at old path");
+    }
+
     // ----- DW-2.7: rewrite_links flag -----
 
     #[test]
