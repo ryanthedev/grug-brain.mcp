@@ -752,7 +752,7 @@
       };
     }
 
-    function renderGraph(data) {
+    async function renderGraph(data) {
       graphData = data;
       const container = document.getElementById("cy");
       if (!container) return;
@@ -775,10 +775,28 @@
       // Bail if sigma or graphology not loaded.
       if (typeof Sigma === "undefined" || typeof graphology === "undefined") return;
 
+      // Only render nodes that participate in at least one edge.
+      // Falls back to all nodes when there are no edges.
+      const connectedPaths = new Set();
+      data.edges.forEach(e => {
+        const src = e.src && e.src.path ? e.src.path : e.src;
+        const dst = e.dst && e.dst.path ? e.dst.path : e.dst;
+        connectedPaths.add(src);
+        connectedPaths.add(dst);
+      });
+      const nodesToRender = connectedPaths.size > 0
+        ? data.nodes.filter(n => connectedPaths.has(n.path))
+        : data.nodes;
+
+      // Show loading indicator, then yield so the browser paints it before
+      // blocking on graph construction.
+      container.setAttribute("data-loading", "true");
+      await new Promise(resolve => requestAnimationFrame(() => setTimeout(resolve, 0)));
+
       // Build graphology graph.
       const g = new graphology.Graph({ type: "undirected", multi: false });
 
-      data.nodes.forEach(n => {
+      nodesToRender.forEach(n => {
         if (!g.hasNode(n.path)) {
           g.addNode(n.path, {
             label: n.name || n.path,
@@ -810,7 +828,7 @@
       });
 
       // Category radial layout for large graphs; force layout for small ones.
-      if (data.nodes.length > 50) {
+      if (nodesToRender.length > 50) {
         applyCategoryLayout(g);
       } else {
         applyForceLayout(g, 100);
@@ -828,6 +846,8 @@
         defaultEdgeColor: colors.edgeSimilarityColor,
         allowInvalidContainer: true,
       });
+
+      container.removeAttribute("data-loading");
 
       // Expose sigma instance for Playwright tests.
       window.__grugSigma = sigmaInstance;
@@ -858,9 +878,9 @@
      * node matching `focusPath` (if given) is enlarged + accent-colored so
      * users can locate the focused memory in the layout.
      */
-    function renderLocal(data, opts) {
+    async function renderLocal(data, opts) {
       opts = opts || {};
-      renderGraph(data);
+      await renderGraph(data);
       if (!sigmaInstance) return;
       const focusPath = opts.focusPath;
       if (!focusPath) return;

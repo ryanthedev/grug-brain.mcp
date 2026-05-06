@@ -427,6 +427,18 @@ a:focus-visible,
   position: relative;
   overflow: hidden;
 }
+#cy[data-loading]::after {
+  content: "Computing\2026";
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  transform: translate(-50%, -50%);
+  color: var(--text-muted);
+  font-size: 10px;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  pointer-events: none;
+}
 
 /* ── Empty state ──────────────────────────────────────── */
 #empty-state {
