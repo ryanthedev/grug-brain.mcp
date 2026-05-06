@@ -739,49 +739,108 @@ pub fn graph_json(
         .collect();
 
     // Similarity edges from cross_links.
-    let mut sim_stmt = db
-        .conn()
-        .prepare(
-            "SELECT brain_a, path_a, brain_b, path_b, score FROM cross_links \
-             WHERE score >= ?1 ORDER BY score DESC LIMIT ?2",
-        )
-        .map_err(|e| e.to_string())?;
-    let sim_edges: Vec<Value> = sim_stmt
-        .query_map(
-            rusqlite::params![SCORE_THRESHOLD, EDGE_CAP as i64],
-            |row| {
-                Ok(json!({
-                    "src": {"brain": row.get::<_, String>(0)?, "path": row.get::<_, String>(1)?},
-                    "dst": {"brain": row.get::<_, String>(2)?, "path": row.get::<_, String>(3)?},
-                    "kind": "similarity",
-                    "score": row.get::<_, f64>(4)?,
-                }))
-            },
-        )
-        .map_err(|e| e.to_string())?
-        .filter_map(|r| r.ok())
-        .collect();
+    // When a brain filter is active, only return edges where both sides belong
+    // to that brain (?1 is reused for brain_a and brain_b via SQLite ?N syntax).
+    let sim_edges: Vec<Value> = match &brain_owned {
+        Some(name) => {
+            let mut sim_stmt = db
+                .conn()
+                .prepare(
+                    "SELECT brain_a, path_a, brain_b, path_b, score FROM cross_links \
+                     WHERE brain_a = ?1 AND brain_b = ?1 AND score >= ?2 \
+                     ORDER BY score DESC LIMIT ?3",
+                )
+                .map_err(|e| e.to_string())?;
+            sim_stmt
+                .query_map(
+                    rusqlite::params![name, SCORE_THRESHOLD, EDGE_CAP as i64],
+                    |row| {
+                        Ok(json!({
+                            "src": {"brain": row.get::<_, String>(0)?, "path": row.get::<_, String>(1)?},
+                            "dst": {"brain": row.get::<_, String>(2)?, "path": row.get::<_, String>(3)?},
+                            "kind": "similarity",
+                            "score": row.get::<_, f64>(4)?,
+                        }))
+                    },
+                )
+                .map_err(|e| e.to_string())?
+                .filter_map(|r| r.ok())
+                .collect()
+        }
+        None => {
+            let mut sim_stmt = db
+                .conn()
+                .prepare(
+                    "SELECT brain_a, path_a, brain_b, path_b, score FROM cross_links \
+                     WHERE score >= ?1 ORDER BY score DESC LIMIT ?2",
+                )
+                .map_err(|e| e.to_string())?;
+            sim_stmt
+                .query_map(
+                    rusqlite::params![SCORE_THRESHOLD, EDGE_CAP as i64],
+                    |row| {
+                        Ok(json!({
+                            "src": {"brain": row.get::<_, String>(0)?, "path": row.get::<_, String>(1)?},
+                            "dst": {"brain": row.get::<_, String>(2)?, "path": row.get::<_, String>(3)?},
+                            "kind": "similarity",
+                            "score": row.get::<_, f64>(4)?,
+                        }))
+                    },
+                )
+                .map_err(|e| e.to_string())?
+                .filter_map(|r| r.ok())
+                .collect()
+        }
+    };
 
     // Explicit wikilink edges from links table (resolved targets only).
-    let mut link_stmt = db
-        .conn()
-        .prepare(
-            "SELECT brain, src_path, target_brain, target_path FROM links \
-             WHERE target_brain IS NOT NULL AND target_path IS NOT NULL LIMIT ?1",
-        )
-        .map_err(|e| e.to_string())?;
-    let link_edges: Vec<Value> = link_stmt
-        .query_map(rusqlite::params![EDGE_CAP as i64], |row| {
-            Ok(json!({
-                "src": {"brain": row.get::<_, String>(0)?, "path": row.get::<_, String>(1)?},
-                "dst": {"brain": row.get::<_, String>(2)?, "path": row.get::<_, String>(3)?},
-                "kind": "explicit",
-                "score": 1.0,
-            }))
-        })
-        .map_err(|e| e.to_string())?
-        .filter_map(|r| r.ok())
-        .collect();
+    // When a brain filter is active, only return edges where both src and dst
+    // belong to that brain.
+    let link_edges: Vec<Value> = match &brain_owned {
+        Some(name) => {
+            let mut link_stmt = db
+                .conn()
+                .prepare(
+                    "SELECT brain, src_path, target_brain, target_path FROM links \
+                     WHERE target_brain IS NOT NULL AND target_path IS NOT NULL \
+                     AND brain = ?1 AND target_brain = ?1 LIMIT ?2",
+                )
+                .map_err(|e| e.to_string())?;
+            link_stmt
+                .query_map(rusqlite::params![name, EDGE_CAP as i64], |row| {
+                    Ok(json!({
+                        "src": {"brain": row.get::<_, String>(0)?, "path": row.get::<_, String>(1)?},
+                        "dst": {"brain": row.get::<_, String>(2)?, "path": row.get::<_, String>(3)?},
+                        "kind": "explicit",
+                        "score": 1.0,
+                    }))
+                })
+                .map_err(|e| e.to_string())?
+                .filter_map(|r| r.ok())
+                .collect()
+        }
+        None => {
+            let mut link_stmt = db
+                .conn()
+                .prepare(
+                    "SELECT brain, src_path, target_brain, target_path FROM links \
+                     WHERE target_brain IS NOT NULL AND target_path IS NOT NULL LIMIT ?1",
+                )
+                .map_err(|e| e.to_string())?;
+            link_stmt
+                .query_map(rusqlite::params![EDGE_CAP as i64], |row| {
+                    Ok(json!({
+                        "src": {"brain": row.get::<_, String>(0)?, "path": row.get::<_, String>(1)?},
+                        "dst": {"brain": row.get::<_, String>(2)?, "path": row.get::<_, String>(3)?},
+                        "kind": "explicit",
+                        "score": 1.0,
+                    }))
+                })
+                .map_err(|e| e.to_string())?
+                .filter_map(|r| r.ok())
+                .collect()
+        }
+    };
 
     let mut edges = sim_edges;
     edges.extend(link_edges);

@@ -13,6 +13,7 @@ use std::sync::Mutex;
 use std::time::Duration;
 use tempfile::TempDir;
 use tokio::net::TcpListener;
+use rusqlite;
 
 const STARTUP_BUDGET_MS: u64 = 5000;
 
@@ -702,6 +703,103 @@ async fn test_dw_3_11_assets_index_and_404() {
         .unwrap()
         .to_string();
     assert!(ct.starts_with("text/plain"), "expected text/plain, got {ct}");
+
+    handle.abort();
+    drop(tmp);
+}
+
+// ---------------------------------------------------------------------------
+// DW-1.1 / DW-1.2 / DW-1.3 / DW-1.4: graph edge brain filter
+// Edges from cross_links and links must respect the ?brain= parameter.
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn test_dw_1_graph_edges_filtered_by_brain() {
+    let (tmp, sock, db_path, cfg, _, _g) = setup();
+    let brain_dir = cfg.brains[0].dir.clone();
+
+    // Seed two nodes in the "memories" brain so the indexer registers them.
+    fs::create_dir_all(brain_dir.join("notes")).unwrap();
+    fs::write(
+        brain_dir.join("notes/alpha.md"),
+        "---\nname: alpha\ndate: 2025-01-01\ndescription: a\n---\n\nalpha body",
+    )
+    .unwrap();
+    fs::write(
+        brain_dir.join("notes/beta.md"),
+        "---\nname: beta\ndate: 2025-01-01\ndescription: b\n---\n\nbeta body",
+    )
+    .unwrap();
+
+    let (handle, port) = start(sock, db_path.clone(), cfg).await;
+
+    // Allow the initial reindex to land.
+    tokio::time::sleep(Duration::from_millis(800)).await;
+
+    // Seed cross_links directly via rusqlite AFTER the server has initialised
+    // the schema.  The server's DB thread is the sole writer, but for test
+    // data insertion we open a second connection in WAL mode; the subsequent
+    // HTTP request sees the committed rows via a fresh read transaction.
+    {
+        let conn = rusqlite::Connection::open(&db_path).unwrap();
+        conn.execute_batch("PRAGMA journal_mode=WAL;").unwrap();
+
+        // Same-brain edge: memories ↔ memories (score above threshold 0.1)
+        conn.execute(
+            "INSERT OR REPLACE INTO cross_links \
+             (brain_a, path_a, brain_b, path_b, score, created_at) \
+             VALUES ('memories', 'notes/alpha.md', 'memories', 'notes/beta.md', 0.5, '2026-01-01')",
+            [],
+        )
+        .unwrap();
+
+        // Cross-brain edge: memories → other (should be excluded when brain=memories)
+        conn.execute(
+            "INSERT OR REPLACE INTO cross_links \
+             (brain_a, path_a, brain_b, path_b, score, created_at) \
+             VALUES ('memories', 'notes/alpha.md', 'other', 'notes/gamma.md', 0.4, '2026-01-01')",
+            [],
+        )
+        .unwrap();
+    }
+
+    let base = format!("http://127.0.0.1:{port}");
+
+    // DW-1.3: brain-scoped request returns exactly 1 cross_links edge.
+    let v: Value = client()
+        .get(format!("{base}/api/graph?brain=memories"))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let edges = v["edges"].as_array().expect("edges should be array");
+    assert_eq!(
+        edges.len(),
+        1,
+        "brain=memories should return exactly 1 edge (same-brain cross_link); got {edges:?}"
+    );
+    let e = &edges[0];
+    assert_eq!(e["src"]["brain"], "memories");
+    assert_eq!(e["dst"]["brain"], "memories");
+    assert_eq!(e["kind"], "similarity");
+
+    // DW-1.4: unfiltered request returns both edges.
+    let v: Value = client()
+        .get(format!("{base}/api/graph"))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let edges = v["edges"].as_array().expect("edges should be array");
+    assert_eq!(
+        edges.len(),
+        2,
+        "unfiltered /api/graph should return 2 edges; got {edges:?}"
+    );
 
     handle.abort();
     drop(tmp);

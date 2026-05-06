@@ -1,5 +1,5 @@
-<!-- base-commit: 74dc260 -->
-<!-- generated: 2026-05-04 -->
+<!-- base-commit: f8e090d -->
+<!-- generated: 2026-05-06 -->
 
 # Code Standards — grug-brain
 
@@ -9,7 +9,7 @@ Single-binary Rust MCP server + in-process axum HTTP server + vanilla-JS web vie
 - `src/main.rs` → `src/client.rs` (MCP tool definitions) → `src/server.rs` (dispatch loop, owns the DB thread).
 - All tool logic in `src/tools/*.rs`, one file per tool. Shared state via `GrugDb`.
 - `src/http/` runs the read-only HTTP/SSE API beside the MCP socket. Handlers send `__http/*` requests through `db_tx` to the DB thread; never touch SQLite directly.
-- `web/` is vendored vanilla JS (no build step). Cytoscape/DOMPurify/marked are checked into `web/vendor/`. **Plan 2 swaps cytoscape → sigma.js** for the local graph view.
+- `web/` is vendored vanilla JS (no build step). sigma.js/graphology/CodeMirror 6/DOMPurify/marked/jsdiff are checked into `web/vendor/`.
 
 Data flow: markdown files → `walker.rs` → `indexing.rs` → SQLite FTS5 → tools query → returned as formatted strings or JSON. Watcher (`src/watcher.rs`) notifies the server, which broadcasts to SSE subscribers.
 
@@ -72,7 +72,7 @@ tests/
 
 **Playwright:** one test per Done-When item, named `dw-N.M: …`. `tests/playwright/fixtures.js` provides the `grugServer` fixture (boots a release binary against a fixture brain on a free port, sets `GRUG_DB`). Use `await expect(locator).toHaveAttribute("aria-pressed", "true")` etc. — prefer a11y selectors over CSS. Run with `make test-playwright`.
 
-**Property tests** (Plan 2): use `proptest` for write-path invariants (path validation, frontmatter round-trip, ETag conflict resolution).
+**Property tests:** use `proptest` for write-path invariants (path validation, frontmatter round-trip, ETag conflict resolution). See `tests/property_write.rs`.
 
 ## Technology Decisions
 
@@ -82,8 +82,8 @@ tests/
 - `notify` for the file watcher → `tokio::sync::broadcast` for fan-out → SSE.
 - `rust-embed` ships `web/` into the binary; FNV-1a content-hash for cache-busting (`?v=hash`).
 - Frontend has no build step. Vendor JS libs live in `web/vendor/` and are committed. Adding a dep = vendoring a minified file + size note in the PR.
-- **Plan 2:** sigma.js replaces cytoscape for the graph view. Vendor the UMD build into `web/vendor/sigma.min.js`; remove `cytoscape.min.js` once the migration lands.
-- CodeMirror 6 (Plan 2): vendor as a single rolled-up bundle. Don't introduce npm at the frontend root.
+- sigma.js + graphology replace cytoscape for the graph view. `web/vendor/sigma.min.js`, `web/vendor/graphology.min.js`.
+- CodeMirror 6: vendored as a single rolled-up bundle via `web/build/`. Don't introduce npm at the frontend root.
 
 ## Forbidden Patterns
 
@@ -100,6 +100,6 @@ tests/
 - Write-path with ETag: `src/tools/write.rs` (Plan 1 Phase 1 hardening; mtime-based ETag, conflict returns Err).
 - Watcher → SSE fan-out: `src/watcher.rs` + `src/http/sse.rs`.
 - Frontend pub-sub: `web/app.js` `state` IIFE + `state.subscribe(render)`.
-- Graph render (will be replaced): `web/app.js` `graph.*` namespace — extract the data-shape contract before swapping to sigma.
-- Cross-links: `dream.rs:123-216` — FTS-based keyword matching.
+- Graph render: `web/app.js` `graph.*` namespace — sigma.js + graphology, node/edge shape is `{brain, path, category, name}` / `{src, dst, kind, score}`.
+- Cross-links: `dream.rs` — cosine similarity (TF-IDF) cross-link insertion into `cross_links` table.
 - Search: `search.rs` — FTS5 + BM25 + pagination.
