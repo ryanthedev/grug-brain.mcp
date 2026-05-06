@@ -619,6 +619,35 @@
      * @param {object} g  — graphology Graph instance with nodes already added
      * @param {number} iterations — number of force iterations (default 100)
      */
+    // Place nodes in category clusters arranged radially — O(n), instant for
+    // large graphs. Each category occupies a circular sub-cluster on the ring.
+    function applyCategoryLayout(g) {
+      const nodes = g.nodes();
+      const n = nodes.length;
+      if (n === 0) return;
+      const catMap = {};
+      nodes.forEach(id => {
+        const cat = g.getNodeAttribute(id, "category") || "";
+        if (!catMap[cat]) catMap[cat] = [];
+        catMap[cat].push(id);
+      });
+      const cats = Object.keys(catMap).sort();
+      const nCats = cats.length;
+      const outerR = Math.max(4, Math.sqrt(n) * 0.4);
+      cats.forEach((cat, ci) => {
+        const angle = (2 * Math.PI * ci) / nCats - Math.PI / 2;
+        const cx = outerR * Math.cos(angle);
+        const cy = outerR * Math.sin(angle);
+        const group = catMap[cat];
+        const innerR = Math.max(0.5, Math.sqrt(group.length) * 0.4);
+        group.forEach((id, i) => {
+          const a = (2 * Math.PI * i) / group.length;
+          g.setNodeAttribute(id, "x", cx + innerR * Math.cos(a));
+          g.setNodeAttribute(id, "y", cy + innerR * Math.sin(a));
+        });
+      });
+    }
+
     function applyForceLayout(g, iterations) {
       iterations = iterations || 100;
       const nodes = g.nodes();
@@ -717,7 +746,7 @@
       const s = getComputedStyle(document.documentElement);
       return {
         labelColor:          s.getPropertyValue("--text-0").trim()  || "#c0caf5",
-        edgeSimilarityColor: s.getPropertyValue("--border").trim()  || "#3b4261",
+        edgeSimilarityColor: s.getPropertyValue("--accent-warm").trim() || "#e0af68",
         edgeExplicitColor:   s.getPropertyValue("--accent").trim()  || "#7aa2f7",
         bgColor:             s.getPropertyValue("--bg-0").trim()    || "#1a1b26",
       };
@@ -755,6 +784,7 @@
             label: n.name || n.path,
             color: categoryColor(n.category || ""),
             size: 5,
+            category: n.category || "",
             // x/y set by layout below
           });
         }
@@ -774,13 +804,17 @@
             kind: e.kind,
             score: e.score,
             color: e.kind === "explicit" ? themeColors().edgeExplicitColor : themeColors().edgeSimilarityColor,
-            size: e.kind === "explicit" ? 2 : 1,
+            size: e.kind === "explicit" ? 2 : 3,
           });
         } catch (_) { /* duplicate edge guard */ }
       });
 
-      // Apply force-directed layout synchronously.
-      applyForceLayout(g, 100);
+      // Category radial layout for large graphs; force layout for small ones.
+      if (data.nodes.length > 50) {
+        applyCategoryLayout(g);
+      } else {
+        applyForceLayout(g, 100);
+      }
 
       const colors = themeColors();
 
@@ -841,7 +875,8 @@
       } catch (_) { /* sigma version mismatch — ignore */ }
     }
 
-    return { render: renderGraph, renderLocal, updateTheme };
+    return { render: renderGraph, renderLocal, updateTheme,
+             refresh: () => sigmaInstance && sigmaInstance.refresh() };
   })();
 
   // ── Frontmatter form ──────────────────────────────────────────────────────
@@ -2607,6 +2642,19 @@
         }
       });
     }
+
+    // Panel fullscreen toggle — shared handler for all .panel-expand-btn buttons.
+    document.querySelectorAll(".panel-expand-btn").forEach(btn => {
+      btn.addEventListener("click", () => {
+        const panelId = btn.dataset.panel;
+        const panel = document.getElementById(panelId);
+        if (!panel) return;
+        const expanded = panel.classList.toggle("panel-fullscreen-active");
+        btn.setAttribute("aria-pressed", expanded ? "true" : "false");
+        btn.setAttribute("aria-label", expanded ? "Collapse panel" : "Expand panel");
+        if (panelId === "graph-panel") graph.refresh();
+      });
+    });
 
     // Window-level Cmd-S / Ctrl-S — fires save.run from anywhere in the page
     // (form fields, toolbar, etc). The CodeMirror keymap handles in-editor.

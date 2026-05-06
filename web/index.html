@@ -70,6 +70,8 @@
         <button id="editor-rename" type="button" aria-label="Rename memory">Rename</button>
         <button id="editor-delete" type="button" aria-label="Delete memory">Delete</button>
         <button id="editor-save" type="button" aria-label="Save memory">Save</button>
+        <button class="panel-expand-btn" data-panel="preview-panel" type="button"
+                aria-pressed="false" aria-label="Expand panel" style="margin-left:auto">⛶</button>
       </div>
 
       <!-- Read-only banner replaces editor for read-only brains -->
@@ -205,8 +207,12 @@
   <aside id="graph-panel" aria-label="Similarity graph">
     <div id="graph-header">
       <span>Graph</span>
-      <button id="graph-mode-toggle" type="button" aria-pressed="false"
-              aria-label="Toggle global / local-N-hop graph view">global</button>
+      <div style="display:flex;gap:4px;align-items:center">
+        <button id="graph-mode-toggle" type="button" aria-pressed="false"
+                aria-label="Toggle global / local-N-hop graph view">global</button>
+        <button class="panel-expand-btn" data-panel="graph-panel" type="button"
+                aria-pressed="false" aria-label="Expand panel">⛶</button>
+      </div>
     </div>
     <div id="cy" aria-label="Memory similarity graph" role="img"></div>
   </aside>
