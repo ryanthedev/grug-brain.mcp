@@ -1,5 +1,10 @@
 /* grug-brain viewer — design tokens + layout */
 
+/* ── Spacing system ────────────────────────────── */
+/* Base grid: 4px. All spacing must be a multiple of 4.       */
+/* Scale: 4 · 8 · 12 · 16 · 20 · 24 · 32 · 40 · 48              */
+/* Exceptions: 0 (reset) and 1px borders/outlines.             */
+
 /* ── Color tokens ─────────────────────────────────────── */
 :root {
   /* Dark theme (default) */
@@ -130,14 +135,18 @@ a:focus-visible,
   color: var(--text-1);
   background: var(--bg-2);
   border: 1px solid var(--border);
-  transition: background 0.15s;
+  transition: background 0.15s, color 0.15s;
 }
 
 .brain-btn:hover { background: var(--bg-hover); }
+/* Active brain: amber underline mark — a tab pulled forward, not a filled chip.
+   The warm tone distinguishes "where you are" from "things you can click" (blue). */
 .brain-btn.active {
-  background: var(--accent);
-  color: #fff;
-  border-color: var(--accent);
+  background: var(--bg-1);
+  color: var(--text-0);
+  border-color: var(--border);
+  border-bottom: 2px solid var(--accent-warm);
+  font-weight: 600;
 }
 .brain-btn.primary::after {
   content: "primary";
@@ -189,7 +198,7 @@ a:focus-visible,
 
 #search-input {
   margin: 0 12px 8px;
-  padding: 6px 10px;
+  padding: 6px 8px;
   background: var(--bg-2);
   border: 1px solid var(--border);
   border-radius: 6px;
@@ -208,7 +217,7 @@ a:focus-visible,
 }
 
 .category-item {
-  margin: 1px 0;
+  margin: 0;
 }
 
 .category-btn {
@@ -216,17 +225,21 @@ a:focus-visible,
   align-items: center;
   gap: 6px;
   width: 100%;
-  padding: 5px 8px;
-  border-radius: 5px;
+  padding: 4px 8px;
+  border-radius: 4px;
   font-size: var(--text-sm);
   color: var(--text-1);
   text-align: left;
   transition: background 0.1s;
 }
 .category-btn:hover { background: var(--bg-hover); }
+/* Active category: same amber left-rule as active memory — consistent position marker
+   across both index columns. The rule says "you are here" without a filled highlight. */
 .category-btn.active {
   background: var(--bg-2);
   color: var(--text-0);
+  border-left: 2px solid var(--accent-warm);
+  padding-left: 6px; /* compensate for the 2px border (was 8px) */
 }
 .category-btn .count {
   margin-left: auto;
@@ -247,7 +260,7 @@ a:focus-visible,
 #memory-list-panel {
   border-right: 1px solid var(--border);
   overflow-y: auto;
-  background: var(--bg-0);
+  background: var(--bg-1);
 }
 
 #memory-list {
@@ -259,11 +272,22 @@ a:focus-visible,
   padding: 8px 12px;
   border-radius: 6px;
   cursor: pointer;
-  margin: 2px 0;
+  margin: 0;
   transition: background 0.1s;
 }
 .memory-item:hover { background: var(--bg-hover); }
-.memory-item.active { background: var(--bg-2); }
+/* Active memory: amber left-rule — a page marker pulled forward in a card index,
+   not a highlighted row. The mark signals position without flooding the reading area. */
+.memory-item.active {
+  background: var(--bg-2);
+  border-left: 2px solid var(--accent-warm);
+  padding-left: 10px; /* compensate for the 2px border */
+}
+.memory-item[aria-selected="true"] {
+  background: var(--bg-2);
+  border-left: 2px solid var(--accent-warm);
+  padding-left: 10px;
+}
 .memory-item .mem-name {
   font-size: var(--text-sm);
   font-weight: 500;
@@ -278,14 +302,14 @@ a:focus-visible,
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
-  margin-top: 1px;
+  margin-top: 0;
 }
 .memory-item .mem-date {
   font-size: var(--text-xs);
   color: var(--text-muted);
-  margin-top: 2px;
+  margin-top: 0;
 }
-.memory-item[aria-selected="true"] { background: var(--bg-2); }
+
 
 /* Preview pane */
 #preview-panel {
@@ -338,8 +362,10 @@ a:focus-visible,
   color: var(--text-0);
 }
 
+/* Blockquote: amber rule, not blue. In a personal notes tool blockquotes are
+   personal asides and observations — annotator's marks, not navigational links. */
 #preview-content blockquote {
-  border-left: 3px solid var(--accent);
+  border-left: 3px solid var(--accent-warm);
   margin: 1em 0;
   padding: 6px 16px;
   color: var(--text-1);
@@ -568,8 +594,8 @@ a:focus-visible,
 #editor-toolbar {
   display: flex;
   align-items: center;
-  gap: 0.75rem;
-  padding: 0.5rem 1rem;
+  gap: 12px;
+  padding: 8px 16px;
   border-bottom: 1px solid var(--border);
   background: var(--bg-1);
 }
