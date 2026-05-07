@@ -2,8 +2,6 @@
  * Graph panel — sigma.js + graphology renderer.
  *
  * Vendor globals `Sigma` and `graphology` are loaded via <script> in index.html.
- * `router` is not yet extracted; call-sites use `window.router` to avoid
- * forward-reference issues.
  *
  * Exported API:
  *   graph.render(data)              — full render from {nodes, edges}
@@ -11,6 +9,8 @@
  *   graph.updateTheme()             — update sigma colors after theme change
  *   graph.refresh()                 — force sigma refresh
  */
+import { router } from './router.js';
+
 export const graph = (() => {
   let sigmaInstance = null;
   let graphData = null; // last-rendered {nodes, edges}
@@ -267,12 +267,11 @@ export const graph = (() => {
     window.__grugSigma = sigmaInstance;
 
     // Click node → navigate to that memory (preserves Plan 1 behavior).
-    // router is not yet extracted — use window.router to avoid forward-reference.
     sigmaInstance.on("clickNode", evt => {
       const nodeId = evt.node;
       const node = data.nodes.find(n => n.path === nodeId);
-      if (node && window.router) {
-        window.router.navigate({ memoryPath: node.path, memoryCategory: node.category });
+      if (node) {
+        router.navigate({ memoryPath: node.path, memoryCategory: node.category });
       }
     });
   }

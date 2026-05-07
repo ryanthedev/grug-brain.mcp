@@ -1,13 +1,12 @@
 /**
  * Backlinks panel — shows which memories link to the active memory.
  *
- * `router` is not yet extracted — uses `window.router` at click-time.
- *
  * Exported API:
  *   backlinks.render() — async; updates the #panel-backlinks-body DOM
  */
 import { state } from './state.js';
 import { api } from './api.js';
+import { router } from './router.js';
 
 export const backlinks = (() => {
   let token = 0;
@@ -53,13 +52,10 @@ export const backlinks = (() => {
       btn.dataset.path = row.path;
       btn.dataset.category = row.category || "";
       btn.addEventListener("click", () => {
-        // router is not yet extracted — use window.router for forward compatibility.
-        if (window.router) {
-          window.router.navigate({
-            memoryPath: row.path,
-            memoryCategory: row.category,
-          });
-        }
+        router.navigate({
+          memoryPath: row.path,
+          memoryCategory: row.category,
+        });
       });
       body.appendChild(btn);
     });

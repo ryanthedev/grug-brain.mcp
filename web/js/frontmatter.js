@@ -11,18 +11,12 @@
  *   frontmatter.wire()             — attach input listeners that update state
  */
 import { state } from './state.js';
+import { computeDirty } from './save.js';
 
 const NAME_INPUT = "fm-name";
 const DESC_INPUT = "fm-description";
 const TAGS_INPUT = "fm-tags";
 const NAME_ERR = "fm-name-error";
-
-/** True when buffer differs from the original snapshot. */
-function computeDirty(buf) {
-  if (!buf) return false;
-  if (buf.body !== buf.originalBody) return true;
-  return JSON.stringify(buf.frontmatter) !== JSON.stringify(buf.originalFrontmatter);
-}
 
 export const frontmatter = (() => {
   function parseTags(s) {

@@ -5,8 +5,10 @@
  * `editorView` and `window.__grugEditorView` (Playwright test hook).
  * On unmount, both are cleared to null.
  *
- * `autocomplete` and `save` are not yet extracted — accessed via window.*
- * to avoid forward-reference issues.
+ * Circular-import note: editor.js ↔ save.js — editor imports save for the
+ * Cmd-S keymap; save imports editor for getView(). All cross-references
+ * are inside function bodies (runtime-only), so the cycle is safe for
+ * native ES modules.
  *
  * Exported API:
  *   editor.mount(container, doc, onChange) — mount CodeMirror into container
@@ -15,6 +17,8 @@
  *   editor.getView()                       — return current EditorView (or null)
  *   getView()                              — named export for outline.js import
  */
+import { save } from './save.js';
+import { autocomplete } from './autocomplete.js';
 
 /** Module-private reference to the live EditorView. */
 let editorView = null;
@@ -70,9 +74,8 @@ export const editor = (() => {
   }
 
   function saveKeymap(CMns) {
-    // save is not yet extracted — use window.save for forward compatibility.
     return CMns.keymap.of([
-      { key: "Mod-s", preventDefault: true, run: () => { if (window.save) window.save.run(); return true; } },
+      { key: "Mod-s", preventDefault: true, run: () => { save.run(); return true; } },
     ]);
   }
 
@@ -103,12 +106,11 @@ export const editor = (() => {
         ".cm-scroller": { fontFamily: "var(--font-mono)" },
       }),
     ];
-    // Phase 6: wikilink + tag autocomplete. Bundle was re-rolled to include
+    // Wikilink + tag autocomplete. Bundle was re-rolled to include
     // @codemirror/autocomplete; CM.autocompletion is the runtime probe.
-    // autocomplete is not yet extracted — use window.autocomplete for forward compatibility.
-    if (CM.autocompletion && window.autocomplete) {
+    if (CM.autocompletion && autocomplete) {
       try {
-        extensions.push(...window.autocomplete.extension(CM));
+        extensions.push(...autocomplete.extension(CM));
         window.__grugACWired = true;
       } catch (e) {
         window.__grugACError = String(e);
