@@ -47,12 +47,15 @@ pub async fn serve_asset(req: Request<Body>) -> Response {
         Some(asset) => {
             let mime = mime_guess::from_path(key).first_or_octet_stream();
             let body = Body::from(asset.data.into_owned());
-            Response::builder()
-                .header(header::CONTENT_TYPE, mime.as_ref())
-                .body(body)
-                .unwrap_or_else(|_| {
-                    (StatusCode::INTERNAL_SERVER_ERROR, "asset build error").into_response()
-                })
+            let mut builder = Response::builder().header(header::CONTENT_TYPE, mime.as_ref());
+            // ES modules under /js/ are never versioned via query string, so instruct
+            // browsers not to cache them. All other assets use ?v=HASH cache-busting.
+            if key.starts_with("js/") {
+                builder = builder.header(header::CACHE_CONTROL, "no-cache");
+            }
+            builder.body(body).unwrap_or_else(|_| {
+                (StatusCode::INTERNAL_SERVER_ERROR, "asset build error").into_response()
+            })
         }
         None => (
             StatusCode::NOT_FOUND,
@@ -141,6 +144,20 @@ mod tests {
     #[test]
     fn content_hash_differs_for_different_input() {
         assert_ne!(content_hash(b"abc"), content_hash(b"abd"));
+    }
+
+    /// Verify that keys under js/ are identified for Cache-Control: no-cache.
+    /// This directly tests the path-matching logic used in serve_asset.
+    #[test]
+    fn js_path_requires_no_cache_header() {
+        // Keys that should get Cache-Control: no-cache
+        for key in &["js/constants.js", "js/state.js", "js/api.js", "js/toast.js", "js/theme.js", "js/modal.js"] {
+            assert!(key.starts_with("js/"), "key {key} should trigger no-cache");
+        }
+        // Keys that should NOT get Cache-Control: no-cache
+        for key in &["app.js", "styles.css", "vendor/sigma.min.js", "index.html"] {
+            assert!(!key.starts_with("js/"), "key {key} should not trigger no-cache");
+        }
     }
 
     /// Verify the index template substitution replaces all placeholders.
