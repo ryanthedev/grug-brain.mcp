@@ -35,7 +35,7 @@ export const crud = (() => {
   /** Pending callback: called with the chosen filename on Create submit. */
   let pendingCreateResolve = null;
 
-  // ── Draft state ──────────────────────────────────────────────────
+  // Draft state
   function openDraft(category) {
     const s = state.get();
     const cat = category || s.activeCategory || "notes";
@@ -59,7 +59,7 @@ export const crud = (() => {
     });
   }
 
-  // ── Create modal ──────────────────────────────────────────────────
+  // Create modal
   function showCreate(prefill) {
     const el = document.getElementById("create-modal");
     if (!el) return Promise.resolve(null);
@@ -114,7 +114,7 @@ export const crud = (() => {
     return true;
   }
 
-  // ── Delete modal ──────────────────────────────────────────────────
+  // Delete modal
   function openDelete() {
     const s = state.get();
     const memPath = s.activeMemoryPath;
@@ -180,7 +180,7 @@ export const crud = (() => {
     router.navigate({ memoryPath: null });
   }
 
-  // ── Rename modal ──────────────────────────────────────────────────
+  // Rename modal
   function openRename() {
     const s = state.get();
     const memPath = s.activeMemoryPath;
@@ -231,7 +231,7 @@ export const crud = (() => {
     const url = `/api/memory/${encodeURIComponent(s.activeBrain)}/${encodeURIComponent(mem.category)}/${encodeURIComponent(filename)}/rename?rewrite_links=${rewrite ? "true" : "false"}`;
     const resp = await api.post(url, { new_path: newPath });
     // Test-surface: expose last rename response for Playwright assertions.
-    window.__lastRenameResponse = resp.data;
+    window.__grugLastRenameResponse = resp.data;
     closeRename();
     if (!resp.ok) {
       toast.show(resp.error || "Rename failed");
