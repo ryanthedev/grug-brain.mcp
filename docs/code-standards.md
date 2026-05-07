@@ -1,4 +1,4 @@
-<!-- base-commit: f8e090d -->
+<!-- base-commit: 8d5378f -->
 <!-- generated: 2026-05-06 -->
 
 # Code Standards — grug-brain
@@ -20,7 +20,8 @@ Data flow: markdown files → `walker.rs` → `indexing.rs` → SQLite FTS5 → 
 - HTTP handlers: short verb names in `src/http/handlers.rs` (`brains`, `memories`, `preview`, `healthz`)
 - DB-thread routes: `__http/{name}` matching the handler
 - Test helpers: `src/tools/mod.rs::test_helpers`
-- Frontend modules: lowercase namespaces inside the IIFE (`api`, `state`, `render`, `router`, `sse`, `graph`, `toast`, `theme`)
+- Frontend modules: lowercase namespaces inside the outer IIFE (`api`, `state`, `render`, `router`, `sse`, `graph`, `toast`, `theme`, `editor`, `save`, `conflict`, `crud`, `autocomplete`, `palette`, etc.) — each is `const x = (() => { ... return { api }; })();`
+- Design tokens: `--font-body: "Helvetica Neue", Helvetica, Arial, sans-serif`. Spacing on 4px grid (4·8·12·16·24·32·40·48px). Active states use amber `--accent-warm` left-border rule, not background flood. Type scale: 11/13/16/20/25px (≥25% jumps between levels).
 
 ## Imports
 
@@ -100,6 +101,7 @@ tests/
 - Write-path with ETag: `src/tools/write.rs` (Plan 1 Phase 1 hardening; mtime-based ETag, conflict returns Err).
 - Watcher → SSE fan-out: `src/watcher.rs` + `src/http/sse.rs`.
 - Frontend pub-sub: `web/app.js` `state` IIFE + `state.subscribe(render)`.
-- Graph render: `web/app.js` `graph.*` namespace — sigma.js + graphology, node/edge shape is `{brain, path, category, name}` / `{src, dst, kind, score}`.
+- Graph render: `web/app.js` `graph.*` namespace — `renderGraph` is `async` (yields via rAF+setTimeout before heavy work). Only renders nodes with at least one edge; falls back to all nodes when no edges exist. Layout: category radial for >50 nodes, Fruchterman-Reingold for ≤50.
+- Graph edge SQL: `cross_links` and `links` queries in `graph_json` branch on `brain_owned` — `WHERE brain_a = ?1 AND brain_b = ?1` when brain is Some, unfiltered when None. Use sequential `?N` param ordering (rusqlite binds positionally).
 - Cross-links: `dream.rs` — cosine similarity (TF-IDF) cross-link insertion into `cross_links` table.
 - Search: `search.rs` — FTS5 + BM25 + pagination.
