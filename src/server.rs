@@ -1,7 +1,8 @@
 use crate::config::{expand_home, load_brains};
+use crate::git::{build_sync_locks, git_commit_file};
 use crate::protocol::{SocketRequest, SocketResponse};
 use crate::services::BrainServices;
-use crate::tools::GrugDb;
+use crate::tools::{GitCommitRequest, GrugDb};
 use crate::types::BrainConfig;
 use serde_json::Value;
 use std::fs;
@@ -23,8 +24,13 @@ pub fn default_socket_path() -> PathBuf {
 }
 
 /// Default PID file path: ~/.grug-brain/grug.pid
-/// Default database path: ~/.grug-brain/grug.db
+/// Default database path: `~/.grug-brain/grug.db`, overridable via `GRUG_DB`.
 fn default_db_path() -> PathBuf {
+    if let Ok(p) = std::env::var("GRUG_DB") {
+        if !p.is_empty() {
+            return PathBuf::from(p);
+        }
+    }
     expand_home("~/.grug-brain/grug.db")
 }
 
@@ -115,7 +121,8 @@ fn dispatch_tool(db: &mut GrugDb, tool: &str, params: &Value) -> Result<String, 
             let path = extract_str(params, "path").ok_or("missing field: path")?;
             let content = extract_str(params, "content").ok_or("missing field: content")?;
             let brain = extract_str(params, "brain");
-            crate::tools::write::grug_write(db, category, path, content, brain)
+            let if_match_mtime = params.get("if_match_mtime").and_then(|v| v.as_f64());
+            crate::tools::write::grug_write(db, category, path, content, brain, if_match_mtime)
         }
         "grug-read" => {
             let brain = extract_str(params, "brain");
@@ -132,7 +139,8 @@ fn dispatch_tool(db: &mut GrugDb, tool: &str, params: &Value) -> Result<String, 
             let category = extract_str(params, "category").ok_or("missing field: category")?;
             let path = extract_str(params, "path").ok_or("missing field: path")?;
             let brain = extract_str(params, "brain");
-            crate::tools::delete::grug_delete(db, category, path, brain)
+            let hard = extract_bool(params, "hard").unwrap_or(false);
+            crate::tools::delete::grug_delete(db, category, path, brain, hard)
         }
         "grug-config" => {
             let action = extract_str(params, "action").ok_or("missing field: action")?;
@@ -183,6 +191,97 @@ fn dispatch_tool(db: &mut GrugDb, tool: &str, params: &Value) -> Result<String, 
             let page = extract_u64(params, "page").map(|p| p as usize);
             crate::tools::docs::grug_docs(db, category, path, page)
         }
+        // HTTP read-only endpoints. These return JSON strings rather than the
+        // formatted text shown to MCP clients, but they share the same
+        // single-writer worker thread (preserving the dispatch_tool invariant).
+        // See `crate::http::handlers` for the matching axum routes.
+        "__http/brains" => crate::http::handlers::brains_json(db),
+        "__http/memories" => {
+            let brain = extract_str(params, "brain");
+            crate::http::handlers::memories_json(db, brain)
+        }
+        "__http/memory" => {
+            let brain = extract_str(params, "brain").ok_or("missing field: brain")?;
+            let category = extract_str(params, "category").ok_or("missing field: category")?;
+            let path = extract_str(params, "path").ok_or("missing field: path")?;
+            crate::http::handlers::memory_json(db, brain, category, path)
+        }
+        "__http/graph" => {
+            let brain = extract_str(params, "brain");
+            let mode = extract_str(params, "mode");
+            let node = extract_str(params, "node");
+            let depth = extract_u64(params, "depth").map(|d| d as usize);
+            crate::http::handlers::graph_json(db, brain, mode, node, depth)
+        }
+        "__http/search" => {
+            let q = extract_str(params, "q").unwrap_or("");
+            let brain = extract_str(params, "brain");
+            crate::http::handlers::search_json(db, q, brain)
+        }
+        "__http/quickswitch" => {
+            let q = extract_str(params, "q").unwrap_or("");
+            crate::http::handlers::quickswitch_json(db, q)
+        }
+        "__http/healthz" => crate::http::handlers::healthz_json(db),
+        // Phase 6 read-only endpoints.
+        "__http/tags" => {
+            let brain = extract_str(params, "brain");
+            crate::http::handlers::tags_json(db, brain)
+        }
+        "__http/backlinks" => {
+            let brain = extract_str(params, "brain");
+            let path = extract_str(params, "path").ok_or("missing field: path")?;
+            crate::http::handlers::backlinks_json(db, brain, path)
+        }
+        "__http/graph_local" => {
+            let brain = extract_str(params, "brain");
+            let path = extract_str(params, "path").ok_or("missing field: path")?;
+            let hops = extract_u64(params, "hops").unwrap_or(2);
+            crate::http::handlers::graph_local_json(db, brain, path, hops)
+        }
+        // Write-path routes (Plan 2 Phase 1).
+        "__http/memory_write" => {
+            let brain = extract_str(params, "brain").ok_or("missing field: brain")?;
+            let rel_path = extract_str(params, "rel_path").ok_or("missing field: rel_path")?;
+            let body = extract_str(params, "body").unwrap_or("");
+            let frontmatter = extract_str(params, "frontmatter");
+            let if_match_etag = params
+                .get("if_match_etag")
+                .and_then(|v| v.as_f64())
+                .ok_or("missing field: if_match_etag")?;
+            let attempted_body = extract_str(params, "attempted_body").unwrap_or(body);
+            crate::http::handlers::memory_write_json(
+                db,
+                brain,
+                rel_path,
+                body,
+                frontmatter,
+                if_match_etag,
+                attempted_body,
+            )
+        }
+        "__http/memory_create" => {
+            let brain = extract_str(params, "brain");
+            let rel_path = extract_str(params, "rel_path").ok_or("missing field: rel_path")?;
+            let body = extract_str(params, "body").unwrap_or("");
+            let frontmatter = extract_str(params, "frontmatter");
+            crate::http::handlers::memory_create_json(db, brain, rel_path, body, frontmatter)
+        }
+        "__http/memory_delete" => {
+            let brain = extract_str(params, "brain").ok_or("missing field: brain")?;
+            let rel_path = extract_str(params, "rel_path").ok_or("missing field: rel_path")?;
+            crate::http::handlers::memory_delete_json(db, brain, rel_path)
+        }
+        "__http/memory_rename" => {
+            let brain = extract_str(params, "brain").ok_or("missing field: brain")?;
+            let old_rel = extract_str(params, "old_rel_path").ok_or("missing field: old_rel_path")?;
+            let new_rel = extract_str(params, "new_rel_path").ok_or("missing field: new_rel_path")?;
+            let rewrite_links = params
+                .get("rewrite_links")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(true);
+            crate::http::handlers::memory_rename_json(db, brain, old_rel, new_rel, rewrite_links)
+        }
         _ => Err(format!("unknown tool: {tool}")),
     }
 }
@@ -192,6 +291,7 @@ fn dispatch_tool(db: &mut GrugDb, tool: &str, params: &Value) -> Result<String, 
 fn spawn_db_thread(
     db_path: &Path,
     config: BrainConfig,
+    git_tx: Option<mpsc::Sender<GitCommitRequest>>,
 ) -> Result<mpsc::Sender<DbRequest>, String> {
     let db_path = db_path.to_path_buf();
     let (tx, mut rx) = mpsc::channel::<DbRequest>(64);
@@ -206,6 +306,9 @@ fn spawn_db_thread(
                     return;
                 }
             };
+            if let Some(tx) = git_tx {
+                db.set_git_tx(tx);
+            }
 
             // Block on the receiver using a simple loop.
             // We use blocking_recv since this is a dedicated std::thread.
@@ -297,6 +400,31 @@ pub async fn run_server(
     db_path: Option<PathBuf>,
     config: Option<BrainConfig>,
 ) -> Result<(), String> {
+    run_server_with_shutdown(socket_path, db_path, config, None).await
+}
+
+/// Same as `run_server` but accepts a programmatic shutdown signal alongside
+/// the SIGINT/SIGTERM handlers. Either source will trigger graceful
+/// shutdown — useful for integration tests that need to verify the full
+/// shutdown path without raising real process-wide signals (which would
+/// affect every test running in the same binary).
+pub async fn run_server_with_shutdown(
+    socket_path: Option<PathBuf>,
+    db_path: Option<PathBuf>,
+    config: Option<BrainConfig>,
+    mut external_shutdown: Option<oneshot::Receiver<()>>,
+) -> Result<(), String> {
+    // Install a global tracing subscriber so the HTTP TraceLayer (and any
+    // other `tracing` events) actually emit. `try_init` is intentional —
+    // tests may install their own subscriber first; we don't want to panic.
+    let _ = tracing_subscriber::fmt()
+        .with_env_filter(
+            tracing_subscriber::EnvFilter::try_from_default_env()
+                .unwrap_or_else(|_| "info,tower_http=info".into()),
+        )
+        .with_writer(std::io::stderr)
+        .try_init();
+
     let socket = socket_path.unwrap_or_else(default_socket_path);
     let db = db_path.unwrap_or_else(default_db_path);
 
@@ -319,8 +447,30 @@ pub async fn run_server(
         None => load_brains()?,
     };
 
+    // Channel: DB worker -> async git committer.
+    // Capacity sized so a burst of writes doesn't block the DB worker; if the
+    // channel ever fills (which would mean git is hung), the DB worker drops
+    // commit requests rather than blocking user-facing writes.
+    let (git_commit_tx, mut git_commit_rx) = mpsc::channel::<GitCommitRequest>(256);
+
     // Start DB worker thread
-    let db_tx = spawn_db_thread(&db, brain_config.clone())?;
+    let db_tx = spawn_db_thread(&db, brain_config.clone(), Some(git_commit_tx))?;
+
+    // Spawn async git-commit consumer. Holds its own copy of the brain list
+    // and the per-brain SyncLocks so it can call `git_commit_file` for the
+    // right brain on each request.
+    let commit_brains = brain_config.brains.clone();
+    let commit_locks = build_sync_locks(&commit_brains);
+    tokio::spawn(async move {
+        while let Some(req) = git_commit_rx.recv().await {
+            let brain = commit_brains.iter().find(|b| b.name == req.brain).cloned();
+            let Some(brain) = brain else {
+                eprintln!("grug: commit request for unknown brain {}", req.brain);
+                continue;
+            };
+            git_commit_file(&brain, &req.rel_path, &req.action, &commit_locks).await;
+        }
+    });
 
     // Bind Unix socket listener
     let listener = UnixListener::bind(&socket)
@@ -336,12 +486,61 @@ pub async fn run_server(
     )
     .await;
 
+    // Start HTTP server alongside the socket. Failure to bind is non-fatal
+    // for the socket transport.
+    let http_port = crate::http::configured_port();
+    let http_state = crate::http::AppState {
+        db_tx: db_tx.clone(),
+        events: services.events_sender(),
+    };
+    let port_file = crate::http::default_port_file();
+    let (http_shutdown_tx, http_shutdown_rx) =
+        tokio::sync::oneshot::channel::<()>();
+    let http_handle: Option<tokio::task::JoinHandle<()>> =
+        match crate::http::bind_listener(http_port).await {
+            Ok((listener, bound)) => {
+                crate::http::write_port_file(&port_file, bound);
+                eprintln!(
+                    "grug serve: http listening on http://127.0.0.1:{bound}"
+                );
+                Some(tokio::spawn(async move {
+                    if let Err(e) = crate::http::run_http(
+                        listener,
+                        http_state,
+                        http_shutdown_rx,
+                    )
+                    .await
+                    {
+                        eprintln!("grug: http server error: {e}");
+                    }
+                }))
+            }
+            Err(e) => {
+                eprintln!("grug: http server disabled: {e}");
+                None
+            }
+        };
+
     // Accept loop with graceful shutdown on SIGINT or SIGTERM
     let mut sigterm =
         tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
             .map_err(|e| format!("grug: failed to register SIGTERM handler: {e}"))?;
 
+    // Helper: a future that resolves when the external shutdown channel
+    // fires, or stays pending forever if no channel was provided. We use a
+    // sentinel `Option::take` so the receiver is consumed exactly once.
     loop {
+        // Build a shutdown future for this iteration. If no external channel
+        // was passed, this future is `pending()` and the select arm is dead.
+        let external_fut = async {
+            match external_shutdown.as_mut() {
+                Some(rx) => {
+                    let _ = rx.await;
+                }
+                None => std::future::pending::<()>().await,
+            }
+        };
+
         tokio::select! {
             accept_result = listener.accept() => {
                 match accept_result {
@@ -362,10 +561,24 @@ pub async fn run_server(
                 eprintln!("grug serve: shutting down (SIGTERM)");
                 break;
             }
+            _ = external_fut => {
+                eprintln!("grug serve: shutting down (external)");
+                break;
+            }
         }
     }
 
-    // Graceful shutdown: stop background services first
+    // Graceful shutdown: tell HTTP server to stop, then background services.
+    let _ = http_shutdown_tx.send(());
+    if let Some(handle) = http_handle {
+        let _ = tokio::time::timeout(
+            std::time::Duration::from_secs(15),
+            handle,
+        )
+        .await;
+    }
+    crate::http::remove_port_file(&port_file);
+
     services.shutdown().await;
 
     // Cleanup

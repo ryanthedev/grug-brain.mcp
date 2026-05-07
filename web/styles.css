@@ -1,0 +1,1118 @@
+/* grug-brain viewer — design tokens + layout */
+
+/* ── Spacing system ────────────────────────────── */
+/* Base grid: 4px. All spacing must be a multiple of 4.       */
+/* Scale: 4 · 8 · 12 · 16 · 20 · 24 · 32 · 40 · 48              */
+/* Exceptions: 0 (reset) and 1px borders/outlines.             */
+
+/* ── Color tokens ─────────────────────────────────────── */
+:root {
+  /* Dark theme (default) */
+  --bg-0: #1a1b26;
+  --bg-1: #24283b;
+  --bg-2: #2d3149;
+  --bg-hover: #2a2f4a;
+  --text-0: #c0caf5;
+  --text-1: #9aa5ce;
+  --text-muted: #565f89;
+  --accent: #7aa2f7;
+  --accent-warm: #e0af68;
+  --border: #3b4261;
+  --success: #9ece6a;
+  --error: #f7768e;
+  --shadow: rgba(10,14,40,0.5);
+}
+
+[data-theme="light"] {
+  --bg-0: #f8f8fc;
+  --bg-1: #ffffff;
+  --bg-2: #e9ecf0;
+  --bg-hover: #dce0ee;
+  --text-0: #1a1b26;
+  --text-1: #3b4261;
+  --text-muted: #9aa5ce;
+  --accent: #2e5fc2;
+  --accent-warm: #9a5900;
+  --border: #d0d5e8;
+  --success: #2d6a0a;
+  --error: #c5152c;
+  --shadow: rgba(0,0,0,0.1);
+}
+
+/* ── Type scale ───────────────────────────────────────── */
+:root {
+  --text-xs: 0.6875rem;  /* 11px — labels/metadata */
+  --text-sm: 0.8125rem;  /* 13px — secondary content */
+  --text-base: 1rem;     /* 16px — primary content (45% jump from xs) */
+  --text-lg: 1.25rem;    /* 20px — subheadings (25% jump) */
+  --text-xl: 1.5625rem;  /* 25px — headings (25% jump) */
+  --font-body: "Helvetica Neue", Helvetica, Arial, sans-serif;
+  --font-mono: "SFMono-Regular", "Menlo", "Monaco", ui-monospace, monospace;
+  --leading-body: 1.6;
+  --leading-ui: 1.4;
+}
+
+/* ── Reset + base ─────────────────────────────────────── */
+*, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+html { height: 100%; }
+
+body {
+  height: 100%;
+  background: var(--bg-0);
+  color: var(--text-0);
+  font-family: var(--font-body);
+  font-size: var(--text-base);
+  line-height: var(--leading-ui);
+}
+
+a { color: var(--accent); text-decoration: none; }
+a:hover { text-decoration: underline; }
+
+button {
+  cursor: pointer;
+  border: none;
+  background: none;
+  color: var(--text-0);
+  font: inherit;
+}
+
+button:focus-visible,
+a:focus-visible,
+[tabindex]:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+  border-radius: 2px;
+}
+
+/* ── Layout ───────────────────────────────────────────── */
+#app {
+  display: grid;
+  grid-template-rows: 48px 1fr;
+  grid-template-columns: 220px 1fr 280px 240px;
+  grid-template-areas:
+    "header header header header"
+    "sidebar main graph panels";
+  height: 100%;
+  overflow: hidden;
+}
+#side-panels { grid-area: panels; }
+
+/* ── Header ───────────────────────────────────────────── */
+#header {
+  grid-area: header;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 0 16px;
+  background: var(--bg-1);
+  border-bottom: 1px solid var(--border);
+  z-index: 10;
+}
+
+#header .logo {
+  font-size: var(--text-lg);
+  font-weight: 600;
+  color: var(--text-0);
+  white-space: nowrap;
+}
+
+#brain-switcher {
+  display: flex;
+  gap: 4px;
+  align-items: center;
+  flex: 1;
+  flex-wrap: wrap;
+}
+
+.brain-btn {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 10px;
+  border-radius: 6px;
+  font-size: var(--text-sm);
+  color: var(--text-1);
+  background: var(--bg-2);
+  border: 1px solid var(--border);
+  transition: background 0.15s, color 0.15s;
+}
+
+.brain-btn:hover { background: var(--bg-hover); }
+/* Active brain: amber underline mark — a tab pulled forward, not a filled chip.
+   The warm tone distinguishes "where you are" from "things you can click" (blue). */
+.brain-btn.active {
+  background: var(--bg-1);
+  color: var(--text-0);
+  border-color: var(--border);
+  border-bottom: 2px solid var(--accent-warm);
+  font-weight: 600;
+}
+.brain-btn.primary::after {
+  content: "primary";
+  font-size: 10px;
+  opacity: 0.7;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+.brain-badge {
+  font-size: 10px;
+  padding: 1px 5px;
+  border-radius: 4px;
+  background: var(--accent-warm);
+  color: var(--bg-0);
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+#theme-toggle {
+  padding: 6px 8px;
+  border-radius: 6px;
+  font-size: var(--text-sm);
+  color: var(--text-1);
+  background: var(--bg-2);
+  border: 1px solid var(--border);
+  white-space: nowrap;
+}
+#theme-toggle:hover { background: var(--bg-hover); }
+
+/* ── Sidebar (category tree) ──────────────────────────── */
+#sidebar {
+  grid-area: sidebar;
+  background: var(--bg-1);
+  border-right: 1px solid var(--border);
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+}
+
+#sidebar-header {
+  padding: 12px 16px 8px;
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: 0.12em;
+  color: var(--text-muted);
+  font-weight: 600;
+}
+
+#search-input {
+  margin: 0 12px 8px;
+  padding: 6px 8px;
+  background: var(--bg-2);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  color: var(--text-0);
+  font: inherit;
+  font-size: var(--text-sm);
+  width: calc(100% - 24px);
+}
+#search-input::placeholder { color: var(--text-muted); }
+#search-input:focus { outline: 2px solid var(--accent); outline-offset: -1px; border-color: transparent; }
+
+#category-tree {
+  flex: 1;
+  padding: 4px 8px;
+  list-style: none;
+}
+
+.category-item {
+  margin: 0;
+}
+
+.category-btn {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  width: 100%;
+  padding: 4px 8px;
+  border-radius: 4px;
+  font-size: var(--text-sm);
+  color: var(--text-1);
+  text-align: left;
+  transition: background 0.1s;
+}
+.category-btn:hover { background: var(--bg-hover); }
+/* Active category: same amber left-rule as active memory — consistent position marker
+   across both index columns. The rule says "you are here" without a filled highlight. */
+.category-btn.active {
+  background: var(--bg-2);
+  color: var(--text-0);
+  border-left: 2px solid var(--accent-warm);
+  padding-left: 6px; /* compensate for the 2px border (was 8px) */
+}
+.category-btn .count {
+  margin-left: auto;
+  font-size: var(--text-xs);
+  color: var(--text-muted);
+}
+
+/* ── Main area ────────────────────────────────────────── */
+#main {
+  grid-area: main;
+  display: grid;
+  grid-template-rows: 1fr;
+  grid-template-columns: 260px 1fr;
+  overflow: hidden;
+}
+
+/* Memory list */
+#memory-list-panel {
+  border-right: 1px solid var(--border);
+  overflow-y: auto;
+  background: var(--bg-1);
+}
+
+#memory-list {
+  list-style: none;
+  padding: 4px;
+}
+
+.memory-item {
+  padding: 8px 12px;
+  border-radius: 6px;
+  cursor: pointer;
+  margin: 0;
+  transition: background 0.1s;
+}
+.memory-item:hover { background: var(--bg-hover); }
+/* Active memory: amber left-rule — a page marker pulled forward in a card index,
+   not a highlighted row. The mark signals position without flooding the reading area. */
+.memory-item.active {
+  background: var(--bg-2);
+  border-left: 2px solid var(--accent-warm);
+  padding-left: 10px; /* compensate for the 2px border */
+}
+.memory-item[aria-selected="true"] {
+  background: var(--bg-2);
+  border-left: 2px solid var(--accent-warm);
+  padding-left: 10px;
+}
+.memory-item .mem-name {
+  font-size: var(--text-sm);
+  font-weight: 500;
+  color: var(--text-0);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.memory-item .mem-desc {
+  font-size: var(--text-xs);
+  color: var(--text-1);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  margin-top: 0;
+}
+.memory-item .mem-date {
+  font-size: var(--text-xs);
+  color: var(--text-muted);
+  margin-top: 0;
+}
+
+
+/* Preview pane */
+#preview-panel {
+  overflow-y: auto;
+  padding: 32px 40px;
+  background: var(--bg-0);
+}
+
+/* ── Markdown preview ─────────────────────────────────── */
+#preview-content {
+  max-width: 680px;
+  line-height: var(--leading-body);
+  color: var(--text-0);
+}
+
+#preview-content h1,
+#preview-content h2,
+#preview-content h3,
+#preview-content h4 {
+  color: var(--text-0);
+  margin: 1.4em 0 0.6em;
+  line-height: 1.3;
+}
+#preview-content h1 { font-size: 1.6rem; }
+#preview-content h2 { font-size: 1.3rem; }
+#preview-content h3 { font-size: 1.1rem; }
+
+#preview-content p { margin: 0.8em 0; }
+
+#preview-content code {
+  font-family: var(--font-mono);
+  font-size: 0.88em;
+  background: var(--bg-2);
+  padding: 1px 5px;
+  border-radius: 3px;
+  color: var(--accent);
+}
+
+#preview-content pre {
+  background: var(--bg-1);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 14px 16px;
+  overflow-x: auto;
+  margin: 1em 0;
+}
+#preview-content pre code {
+  background: none;
+  padding: 0;
+  color: var(--text-0);
+}
+
+/* Blockquote: amber rule, not blue. In a personal notes tool blockquotes are
+   personal asides and observations — annotator's marks, not navigational links. */
+#preview-content blockquote {
+  border-left: 3px solid var(--accent-warm);
+  margin: 1em 0;
+  padding: 6px 16px;
+  color: var(--text-1);
+}
+
+#preview-content ul, #preview-content ol {
+  margin: 0.8em 0;
+  padding-left: 1.5em;
+}
+
+#preview-content li { margin: 0.3em 0; }
+
+#preview-content a { color: var(--accent); }
+
+#preview-content hr {
+  border: none;
+  border-top: 1px solid var(--border);
+  margin: 1.5em 0;
+}
+
+#preview-content table {
+  border-collapse: collapse;
+  width: 100%;
+  margin: 1em 0;
+}
+#preview-content th, #preview-content td {
+  border: none;
+  border-bottom: 1px solid var(--border);
+  padding: 6px 10px;
+  text-align: left;
+}
+#preview-content th { background: var(--bg-1); }
+
+/* ── Graph panel ──────────────────────────────────────── */
+#graph-panel {
+  grid-area: graph;
+  background: var(--bg-1);
+  border-left: 1px solid var(--border);
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+
+#graph-header {
+  padding: 10px 14px;
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: 0.12em;
+  color: var(--text-muted);
+  font-weight: 600;
+  border-bottom: 1px solid var(--border);
+  flex-shrink: 0;
+}
+
+#cy {
+  flex: 1;
+  width: 100%;
+  /* sigma requires position:relative and overflow:hidden on its container */
+  position: relative;
+  overflow: hidden;
+}
+#cy[data-loading]::after {
+  content: "Computing\2026";
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  transform: translate(-50%, -50%);
+  color: var(--text-muted);
+  font-size: 10px;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  pointer-events: none;
+}
+
+/* ── Empty state ──────────────────────────────────────── */
+#empty-state {
+  display: none;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  padding: 48px 24px;
+  text-align: center;
+  color: var(--text-muted);
+  gap: 12px;
+}
+#empty-state.visible { display: flex; }
+#empty-state .empty-icon { font-size: 2.5rem; }
+#empty-state .empty-title {
+  font-size: var(--text-lg);
+  font-weight: 600;
+  color: var(--text-1);
+}
+#empty-state .empty-msg {
+  font-size: var(--text-sm);
+  line-height: 1.5;
+}
+#empty-state code {
+  font-family: var(--font-mono);
+  background: var(--bg-2);
+  padding: 2px 6px;
+  border-radius: 4px;
+  font-size: 0.9em;
+  color: var(--accent);
+}
+
+/* ── Toast ────────────────────────────────────────────── */
+#toast-container {
+  position: fixed;
+  bottom: 20px;
+  right: 20px;
+  z-index: 1000;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  pointer-events: none;
+}
+
+.toast {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  padding: 12px 14px;
+  background: var(--bg-1);
+  border: 1px solid var(--error);
+  border-radius: 8px;
+  box-shadow: 0 4px 16px var(--shadow);
+  max-width: 380px;
+  pointer-events: auto;
+  animation: toast-in 0.2s ease;
+}
+@keyframes toast-in {
+  from { opacity: 0; transform: translateY(8px); }
+  to   { opacity: 1; transform: translateY(0); }
+}
+.toast-body { flex: 1; }
+.toast-title {
+  font-size: var(--text-sm);
+  font-weight: 600;
+  color: var(--error);
+  margin-bottom: 3px;
+}
+.toast-message {
+  font-size: var(--text-xs);
+  color: var(--text-1);
+  word-break: break-all;
+}
+.toast-copy {
+  flex-shrink: 0;
+  font-size: var(--text-xs);
+  padding: 3px 8px;
+  border-radius: 4px;
+  background: var(--bg-2);
+  border: 1px solid var(--border);
+  color: var(--text-1);
+  cursor: pointer;
+}
+.toast-copy:hover { background: var(--bg-hover); }
+.toast-close {
+  flex-shrink: 0;
+  font-size: 14px;
+  color: var(--text-muted);
+  padding: 0 4px;
+  cursor: pointer;
+}
+
+/* ── Preview placeholder ──────────────────────────────── */
+.preview-placeholder {
+  color: var(--text-muted);
+  font-size: var(--text-sm);
+  padding: 24px 0;
+}
+
+/* ── Reload indicator ─────────────────────────────────── */
+#reload-indicator {
+  position: fixed;
+  top: 54px;
+  right: 12px;
+  font-size: var(--text-xs);
+  color: var(--accent);
+  background: var(--bg-1);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  padding: 3px 8px;
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity 0.2s;
+  z-index: 50;
+}
+#reload-indicator.visible { opacity: 1; }
+
+/* ── Connection status dot ───────────────────────────── */
+#sse-status {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--text-muted);
+  flex-shrink: 0;
+}
+#sse-status.connected { background: var(--success); }
+#sse-status.error {
+  background: transparent;
+  border: 2px solid var(--error);
+}
+
+/* ── Scrollbar styling ────────────────────────────────── */
+::-webkit-scrollbar { width: 6px; height: 6px; }
+::-webkit-scrollbar-track { background: transparent; }
+::-webkit-scrollbar-thumb {
+  background: var(--border);
+  border-radius: 3px;
+}
+::-webkit-scrollbar-thumb:hover { background: var(--text-muted); }
+
+/* ── Responsive: hide graph panel on narrow viewports ─── */
+@media (max-width: 900px) {
+  #app {
+    grid-template-columns: 200px 1fr 0 0;
+    grid-template-areas:
+      "header header header header"
+      "sidebar main main main";
+  }
+  #graph-panel { display: none; }
+  #side-panels { display: none; }
+}
+
+@media (max-width: 600px) {
+  #app {
+    grid-template-columns: 1fr;
+    grid-template-areas:
+      "header"
+      "main";
+  }
+  #sidebar { display: none; }
+}
+
+/* ── Plan 2 Phase 4: editor + frontmatter form ─────────── */
+
+#editor-toolbar {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 8px 16px;
+  border-bottom: 1px solid var(--border);
+  background: var(--bg-1);
+}
+
+#mode-toggle,
+#editor-save {
+  padding: 0.35rem 0.75rem;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  background: var(--bg-2);
+  color: var(--text-0);
+  font-size: var(--text-sm);
+}
+#mode-toggle:hover,
+#editor-save:hover { background: var(--bg-hover); }
+#editor-save[disabled] { opacity: 0.5; cursor: not-allowed; }
+
+#dirty-indicator {
+  color: var(--accent-warm);
+  font-size: var(--text-sm);
+  margin-left: auto;
+}
+#dirty-indicator[hidden] { display: none; }
+
+#frontmatter-form {
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+  padding: 0.75rem 1rem;
+  border-bottom: 1px solid var(--border);
+  background: var(--bg-1);
+}
+#frontmatter-form[hidden] { display: none; }
+
+.fm-row {
+  display: grid;
+  grid-template-columns: 110px 1fr;
+  align-items: center;
+  gap: 0.5rem;
+}
+.fm-row label {
+  font-size: var(--text-sm);
+  color: var(--text-1);
+}
+.fm-row input {
+  width: 100%;
+  padding: 0.35rem 0.5rem;
+  font: inherit;
+  font-size: var(--text-sm);
+  color: var(--text-0);
+  background: var(--bg-0);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+}
+.fm-row small {
+  grid-column: 2;
+  color: var(--text-muted);
+  font-size: var(--text-xs);
+}
+.fm-error {
+  grid-column: 2;
+  color: var(--error);
+  font-size: var(--text-xs);
+}
+.fm-error[hidden] { display: none; }
+
+#editor-host {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow: auto;
+  background: var(--bg-0);
+}
+#editor-host:empty { display: none; }
+
+/* CodeMirror visual integration with grug theme. */
+.cm-editor {
+  height: 100%;
+  font-family: var(--font-mono);
+  font-size: var(--text-sm);
+  background: var(--bg-0);
+  color: var(--text-0);
+}
+.cm-editor.cm-focused { outline: 2px solid var(--accent); outline-offset: -2px; }
+.cm-content { padding: 0.75rem 1rem; caret-color: var(--accent); }
+.cm-gutters {
+  background: var(--bg-1);
+  color: var(--text-muted);
+  border-right: 1px solid var(--border);
+}
+.cm-activeLine { background: var(--bg-1); }
+.cm-activeLineGutter { background: var(--bg-2); }
+.cm-selectionBackground,
+.cm-content ::selection {
+  background: var(--accent) !important;
+  opacity: 0.3;
+}
+
+/* Wikilink + tag decorations. */
+.cm-wikilink {
+  color: var(--accent);
+  text-decoration: underline dotted;
+}
+.cm-tag {
+  color: var(--success);
+  font-weight: 600;
+}
+
+/* Read-only banner. */
+.readonly-banner {
+  margin: 1rem;
+  padding: 0.75rem 1rem;
+  background: var(--bg-2);
+  border: 1px solid var(--border);
+  border-left: 4px solid var(--accent-warm);
+  border-radius: 4px;
+  color: var(--text-0);
+  font-size: var(--text-sm);
+}
+
+/* Modal — used by unsaved-changes guard. */
+#unsaved-modal[hidden] { display: none; }
+#unsaved-modal {
+  position: fixed;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 1000;
+}
+#unsaved-modal .modal-backdrop {
+  position: absolute;
+  inset: 0;
+  background: rgba(0,0,0,0.55);
+}
+#unsaved-modal .modal-body {
+  position: relative;
+  background: var(--bg-1);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 1rem 1.25rem;
+  max-width: 440px;
+  box-shadow: 0 8px 32px var(--shadow);
+}
+#unsaved-modal .modal-body h2 {
+  font-size: var(--text-lg);
+  margin-bottom: 0.5rem;
+}
+#unsaved-modal .modal-body p {
+  font-size: var(--text-sm);
+  color: var(--text-1);
+  margin-bottom: 1rem;
+}
+#unsaved-modal .modal-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 0.5rem;
+}
+#unsaved-modal .modal-actions button {
+  padding: 0.4rem 0.9rem;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  background: var(--bg-2);
+  color: var(--text-0);
+}
+#unsaved-modal #unsaved-discard {
+  background: var(--error);
+  color: var(--bg-0);
+  border-color: var(--error);
+}
+
+/* ── Plan 2 Phase 5: shared modal scaffold + CRUD + conflict UI ───────── */
+
+/* Generic modal applied to all Phase 5 modals. */
+.grug-modal {
+  position: fixed;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 1000;
+}
+.grug-modal[hidden] { display: none; }
+.grug-modal .modal-backdrop {
+  position: absolute;
+  inset: 0;
+  background: rgba(0,0,0,0.55);
+}
+.grug-modal .modal-body {
+  position: relative;
+  background: var(--bg-1);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 1rem 1.25rem;
+  max-width: 440px;
+  box-shadow: 0 8px 32px var(--shadow);
+}
+.grug-modal .modal-body-wide { max-width: 1100px; width: 92vw; }
+.grug-modal .modal-body h2 {
+  font-size: var(--text-lg);
+  margin-bottom: 0.5rem;
+}
+.grug-modal .modal-body .modal-help {
+  font-size: var(--text-sm);
+  color: var(--text-1);
+  margin-bottom: 0.75rem;
+}
+.grug-modal .modal-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 0.5rem;
+  margin-top: 1rem;
+}
+.grug-modal .modal-actions button {
+  padding: 0.4rem 0.9rem;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  background: var(--bg-2);
+  color: var(--text-0);
+}
+.grug-modal .modal-actions button[disabled] {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+#conflict-overwrite {
+  background: var(--error);
+  color: var(--bg-0);
+  border-color: var(--error);
+}
+.grug-modal .fm-row { margin: 0.4rem 0; }
+
+/* Conflict modal — three side-by-side panes. */
+.conflict-panes {
+  display: grid;
+  grid-template-columns: 1fr 1fr 1fr;
+  gap: 0.5rem;
+  max-height: 60vh;
+}
+.conflict-panes section { display: flex; flex-direction: column; min-width: 0; }
+.conflict-panes h3 {
+  font-size: var(--text-xs);
+  text-transform: uppercase;
+  letter-spacing: 0.12em;
+  color: var(--text-muted);
+  font-weight: 600;
+  margin-bottom: 0.25rem;
+}
+.conflict-pane {
+  font-family: var(--font-mono);
+  font-size: var(--text-xs);
+  background: var(--bg-0);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  padding: 0.5rem;
+  overflow: auto;
+  white-space: pre-wrap;
+  word-break: break-word;
+  max-height: 56vh;
+  color: var(--text-0);
+}
+.conflict-diff .diff-add {
+  display: block;
+  background: rgba(158, 206, 106, 0.18); /* var(--success) tint */
+  color: var(--success);
+}
+.conflict-diff .diff-remove {
+  display: block;
+  background: rgba(247, 118, 142, 0.18); /* var(--error) tint */
+  color: var(--error);
+}
+.conflict-diff .diff-context { display: block; color: var(--text-1); }
+
+/* Per-category "+" button (DW-5.4 entry point). */
+.category-add {
+  margin-left: 4px;
+  font-size: var(--text-xs);
+  padding: 0 6px;
+  border-radius: 3px;
+  background: transparent;
+  color: var(--text-muted);
+  border: 1px solid transparent;
+}
+.category-add:hover {
+  background: var(--bg-hover);
+  color: var(--text-0);
+  border-color: var(--border);
+}
+
+/* Editor toolbar new buttons. */
+#editor-rename,
+#editor-delete {
+  padding: 0.35rem 0.75rem;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  background: var(--bg-2);
+  color: var(--text-0);
+  font-size: var(--text-sm);
+}
+#editor-rename:hover,
+#editor-delete:hover { background: var(--bg-hover); }
+#editor-delete { color: var(--error); }
+
+/* Success-variant toast (already styled inline; ensure border green). */
+.toast.toast-success {
+  border-color: var(--success);
+}
+.toast.toast-success .toast-title { color: var(--success); }
+
+/* Ensure [hidden] always wins over our id-based display rules. */
+[hidden] { display: none !important; }
+
+/* ───────────────────────────────────────────────────────────────────────────
+   Phase 6: side panels (backlinks, outline, tags) + Cmd-K palette
+   ─────────────────────────────────────────────────────────────────────────── */
+
+#side-panels {
+  grid-column: 4;
+  grid-row: 2;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 8px;
+  border-left: 1px solid var(--border);
+  background: var(--bg-1);
+  overflow-y: auto;
+  min-width: 0;
+  max-width: 280px;
+}
+
+.side-panel {
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  background: var(--bg-0);
+}
+.side-panel-header { padding: 0; }
+.side-panel-toggle {
+  width: 100%;
+  text-align: left;
+  background: transparent;
+  border: none;
+  border-bottom: 1px solid var(--border);
+  color: var(--text-0);
+  padding: 6px 10px;
+  font-weight: 600;
+  cursor: pointer;
+}
+.side-panel-toggle[aria-expanded="false"] { border-bottom: none; }
+.side-panel-toggle[aria-expanded="false"] + .side-panel-body { display: none; }
+.side-panel-body {
+  padding: 6px 10px;
+  font-size: var(--text-sm, 13px);
+  max-height: 200px;
+  overflow-y: auto;
+}
+.side-panel-empty {
+  color: var(--text-muted);
+  font-style: italic;
+  margin: 0;
+}
+.side-panel-item {
+  display: block;
+  width: 100%;
+  text-align: left;
+  background: transparent;
+  border: none;
+  color: var(--text-0);
+  padding: 4px 6px;
+  cursor: pointer;
+  border-radius: 3px;
+  font-family: inherit;
+  font-size: inherit;
+}
+.side-panel-item:hover, .side-panel-item:focus-visible {
+  background: var(--bg-1);
+  outline: 2px solid var(--accent);
+  outline-offset: -2px;
+}
+.outline-h2 { padding-left: 12px; }
+.outline-h3 { padding-left: 24px; }
+.outline-h4 { padding-left: 36px; }
+.outline-h5 { padding-left: 48px; }
+.outline-h6 { padding-left: 60px; }
+.tag-count {
+  color: var(--text-muted);
+  margin-left: 6px;
+  font-variant-numeric: tabular-nums;
+}
+
+#graph-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 8px;
+}
+#graph-mode-toggle {
+  background: transparent;
+  border: 1px solid var(--border);
+  color: var(--text-0);
+  padding: 2px 8px;
+  border-radius: 3px;
+  cursor: pointer;
+  font-size: 12px;
+}
+#graph-mode-toggle[aria-pressed="true"] {
+  background: var(--accent);
+  color: var(--bg-0);
+}
+
+.panel-expand-btn {
+  background: transparent;
+  border: 1px solid var(--border);
+  color: var(--text-1);
+  padding: 2px 6px;
+  border-radius: 3px;
+  cursor: pointer;
+  font-size: 12px;
+  line-height: 1.2;
+  flex-shrink: 0;
+}
+.panel-expand-btn:hover { background: var(--bg-2); }
+.panel-expand-btn[aria-pressed="true"] {
+  border-color: var(--accent);
+  color: var(--accent);
+}
+
+.panel-fullscreen-active {
+  position: fixed !important;
+  inset: 48px 0 0 0 !important;
+  z-index: 200 !important;
+  width: 100vw !important;
+  height: calc(100vh - 48px) !important;
+  overflow: auto;
+  background: var(--bg-0);
+}
+
+/* ── Palette ─────────────────────────────────────────────────────────────── */
+
+.modal-body-palette {
+  width: min(640px, 92vw);
+  padding: 0;
+  overflow: hidden;
+}
+.visually-hidden {
+  position: absolute !important;
+  width: 1px; height: 1px;
+  padding: 0; margin: -1px;
+  overflow: hidden; clip: rect(0,0,0,0);
+  white-space: nowrap; border: 0;
+}
+#palette-input {
+  width: 100%;
+  box-sizing: border-box;
+  border: none;
+  border-bottom: 1px solid var(--border);
+  background: transparent;
+  color: var(--text-0);
+  padding: 14px 16px;
+  font-size: 16px;
+  font-family: inherit;
+  outline: none;
+}
+#palette-input:focus-visible { border-bottom-color: var(--accent); outline: none; }
+#palette-list {
+  list-style: none;
+  margin: 0;
+  padding: 4px 0;
+  max-height: 60vh;
+  overflow-y: auto;
+}
+.palette-item {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  padding: 6px 14px;
+  cursor: pointer;
+  color: var(--text-0);
+  font-size: 14px;
+}
+.palette-item.active {
+  background: var(--accent);
+  color: var(--bg-0);
+}
+.palette-item .palette-kind {
+  flex: 0 0 auto;
+  font-size: 11px;
+  text-transform: uppercase;
+  color: var(--text-muted);
+  min-width: 64px;
+}
+.palette-item.active .palette-kind { color: var(--bg-0); }
+.palette-item .palette-title {
+  flex: 1 1 auto;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+/* CodeMirror autocomplete tooltip — match dark theme. */
+.cm-tooltip-autocomplete {
+  background: var(--bg-1);
+  border: 1px solid var(--border);
+  color: var(--text-0);
+  font-family: var(--font-mono);
+}
+.cm-tooltip-autocomplete > ul > li[aria-selected],
+.cm-tooltip-autocomplete > ul > li:hover {
+  background: var(--accent);
+  color: var(--bg-0);
+}

@@ -1,4 +1,5 @@
-use crate::parsing::{extract_body, extract_description, extract_frontmatter};
+use crate::helpers::today;
+use crate::parsing::{extract_body, extract_description, extract_frontmatter, parse_links, parse_tags};
 use crate::tools::tfidf;
 use crate::types::Brain;
 use crate::walker::{get_categories, walk_files};
@@ -68,10 +69,107 @@ pub fn index_file(
     )
     .map_err(|e| format!("upsert file: {e}"))?;
 
+    // Re-populate links + tags. We delete first so a re-index of an edited
+    // file replaces (rather than accumulates) its outgoing references and
+    // tags. Target-side `links` rows pointing at this file are intentionally
+    // left untouched -- those represent OTHER memories' outgoing references.
+    conn.execute(
+        "DELETE FROM links WHERE brain = ?1 AND src_path = ?2",
+        rusqlite::params![brain_name, rel_path],
+    )
+    .map_err(|e| format!("delete src links: {e}"))?;
+    conn.execute(
+        "DELETE FROM tags WHERE brain = ?1 AND path = ?2",
+        rusqlite::params![brain_name, rel_path],
+    )
+    .map_err(|e| format!("delete tags: {e}"))?;
+
+    let now = today();
+    for target in parse_links(&content) {
+        let (target_brain, target_path, unresolved) =
+            resolve_link(conn, brain_name, &target);
+        // Insert OR IGNORE: PK is composite (brain, src, target_brain,
+        // target_path, target_name_unresolved); duplicate parses dedupe at
+        // SQL boundary too.
+        conn.execute(
+            "INSERT OR IGNORE INTO links (brain, src_path, target_brain, target_path, target_name_unresolved, created_at) \
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+            rusqlite::params![
+                brain_name,
+                rel_path,
+                target_brain,
+                target_path,
+                unresolved,
+                now
+            ],
+        )
+        .map_err(|e| format!("insert link: {e}"))?;
+    }
+    for tag in parse_tags(&content) {
+        conn.execute(
+            "INSERT OR IGNORE INTO tags (brain, path, tag) VALUES (?1, ?2, ?3)",
+            rusqlite::params![brain_name, rel_path, tag],
+        )
+        .map_err(|e| format!("insert tag: {e}"))?;
+    }
+
     // Compute and store TF-IDF term weights for this document
     tfidf::compute_and_store_weights(conn, brain_name, rel_path)?;
 
     Ok(())
+}
+
+/// Resolve a `[[target]]` string to a stored row triple
+/// `(target_brain, target_path, target_name_unresolved)`. Within-brain only:
+/// cross-brain links are deferred to a later plan.
+///
+/// - If the target contains `/`, it's treated as `category/slug` and we look
+///   up `path = "<category>/<slug>.md"` in the same brain.
+/// - Else we look up by `name` column in `brain_fts` within the same brain.
+/// - On miss, store `target_name_unresolved` only; both target columns NULL
+///   so future re-resolution can fill them in.
+fn resolve_link(
+    conn: &Connection,
+    brain_name: &str,
+    target: &str,
+) -> (Option<String>, Option<String>, Option<String>) {
+    let trimmed = target.trim();
+    if trimmed.is_empty() {
+        return (None, None, Some(target.to_string()));
+    }
+
+    if trimmed.contains('/') {
+        // Treat as category/slug. Try exact path match first.
+        let candidate_path = if trimmed.ends_with(".md") {
+            trimmed.to_string()
+        } else {
+            format!("{trimmed}.md")
+        };
+        let found: Option<String> = conn
+            .query_row(
+                "SELECT path FROM brain_fts WHERE brain = ?1 AND path = ?2 LIMIT 1",
+                rusqlite::params![brain_name, &candidate_path],
+                |row| row.get(0),
+            )
+            .ok();
+        if let Some(p) = found {
+            return (Some(brain_name.to_string()), Some(p), None);
+        }
+        return (None, None, Some(target.to_string()));
+    }
+
+    // Bare name -- look up by `name` column.
+    let found: Option<String> = conn
+        .query_row(
+            "SELECT path FROM brain_fts WHERE brain = ?1 AND name = ?2 LIMIT 1",
+            rusqlite::params![brain_name, trimmed],
+            |row| row.get(0),
+        )
+        .ok();
+    if let Some(p) = found {
+        return (Some(brain_name.to_string()), Some(p), None);
+    }
+    (None, None, Some(target.to_string()))
 }
 
 /// Remove a file from all database tables (FTS, files, dream_log, cross_links, term_weights, doc_norms).
@@ -99,6 +197,24 @@ pub fn remove_file(conn: &Connection, brain_name: &str, rel_path: &str) -> Resul
         rusqlite::params![brain_name, rel_path],
     )
     .map_err(|e| format!("delete cross_links: {e}"))?;
+
+    // Clear wikilinks where this file is the SOURCE.
+    //
+    // Target-side rows are intentionally preserved: leaving them in place
+    // means other memories that linked to this file will surface as broken
+    // outgoing references to UI consumers, instead of silently disappearing.
+    // (See DW-2.4.)
+    conn.execute(
+        "DELETE FROM links WHERE brain = ?1 AND src_path = ?2",
+        rusqlite::params![brain_name, rel_path],
+    )
+    .map_err(|e| format!("delete links (src): {e}"))?;
+
+    conn.execute(
+        "DELETE FROM tags WHERE brain = ?1 AND path = ?2",
+        rusqlite::params![brain_name, rel_path],
+    )
+    .map_err(|e| format!("delete tags: {e}"))?;
 
     tfidf::remove_weights(conn, brain_name, rel_path)?;
 
@@ -536,6 +652,208 @@ mod tests {
             )
             .unwrap();
         assert_eq!(dn_after, 0, "sync should clean doc_norms for removed files");
+    }
+
+    // ----- DW-2.3: index_file populates links + tags -----
+
+    #[test]
+    fn test_dw_2_3_index_file_populates_tags() {
+        let (db, tmp) = test_db();
+        let brain_dir = tmp.path().join("memories");
+        let f = create_brain_file(
+            &brain_dir,
+            "notes/tagged.md",
+            "---\nname: tagged\n---\n\nThis has #rust and #foo-bar tags.",
+        );
+        index_file(db.conn(), "memories", "notes/tagged.md", &f, "notes").unwrap();
+
+        let mut tags: Vec<String> = db
+            .conn()
+            .prepare("SELECT tag FROM tags WHERE brain = 'memories' AND path = 'notes/tagged.md'")
+            .unwrap()
+            .query_map([], |row| row.get::<_, String>(0))
+            .unwrap()
+            .filter_map(|r| r.ok())
+            .collect();
+        tags.sort();
+        assert_eq!(tags, vec!["foo-bar".to_string(), "rust".to_string()]);
+    }
+
+    #[test]
+    fn test_dw_2_3_index_file_populates_links() {
+        let (db, tmp) = test_db();
+        let brain_dir = tmp.path().join("memories");
+        let f = create_brain_file(
+            &brain_dir,
+            "notes/source.md",
+            "---\nname: source\n---\n\nSee [[Unresolved Target]] reference.",
+        );
+        index_file(db.conn(), "memories", "notes/source.md", &f, "notes").unwrap();
+
+        let count: i32 = db
+            .conn()
+            .query_row(
+                "SELECT COUNT(*) FROM links WHERE brain = 'memories' AND src_path = 'notes/source.md'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(count, 1);
+
+        // Unresolved -> target_brain/target_path NULL, name set
+        let unresolved: String = db
+            .conn()
+            .query_row(
+                "SELECT target_name_unresolved FROM links WHERE brain = 'memories' AND src_path = 'notes/source.md'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(unresolved, "Unresolved Target");
+    }
+
+    #[test]
+    fn test_dw_2_3_index_file_resolves_within_brain_link() {
+        let (db, tmp) = test_db();
+        let brain_dir = tmp.path().join("memories");
+
+        // Index target FIRST so the source's link can resolve to it
+        let f_target = create_brain_file(
+            &brain_dir,
+            "notes/target.md",
+            "---\nname: target-note\n---\n\nTarget body.",
+        );
+        index_file(db.conn(), "memories", "notes/target.md", &f_target, "notes").unwrap();
+
+        let f_src = create_brain_file(
+            &brain_dir,
+            "notes/source.md",
+            "---\nname: source\n---\n\nLinks to [[target-note]] by name.",
+        );
+        index_file(db.conn(), "memories", "notes/source.md", &f_src, "notes").unwrap();
+
+        let row: (Option<String>, Option<String>, Option<String>) = db
+            .conn()
+            .query_row(
+                "SELECT target_brain, target_path, target_name_unresolved FROM links \
+                 WHERE brain = 'memories' AND src_path = 'notes/source.md'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .unwrap();
+        assert_eq!(row.0.as_deref(), Some("memories"));
+        assert_eq!(row.1.as_deref(), Some("notes/target.md"));
+        assert!(row.2.is_none(), "resolved link should have NULL unresolved name, got {:?}", row.2);
+    }
+
+    #[test]
+    fn test_dw_2_3_re_index_replaces_links_and_tags() {
+        // Editing a memory should not accumulate stale links/tags rows.
+        let (db, tmp) = test_db();
+        let brain_dir = tmp.path().join("memories");
+        let f = create_brain_file(
+            &brain_dir,
+            "notes/edit.md",
+            "---\nname: edit\n---\n\n#first [[FirstLink]]",
+        );
+        index_file(db.conn(), "memories", "notes/edit.md", &f, "notes").unwrap();
+
+        // Overwrite with different links/tags
+        std::fs::write(&f, "---\nname: edit\n---\n\n#second [[SecondLink]]").unwrap();
+        index_file(db.conn(), "memories", "notes/edit.md", &f, "notes").unwrap();
+
+        let tags: Vec<String> = db
+            .conn()
+            .prepare("SELECT tag FROM tags WHERE brain = 'memories' AND path = 'notes/edit.md'")
+            .unwrap()
+            .query_map([], |row| row.get::<_, String>(0))
+            .unwrap()
+            .filter_map(|r| r.ok())
+            .collect();
+        assert_eq!(tags, vec!["second".to_string()]);
+
+        let unresolved: Vec<String> = db
+            .conn()
+            .prepare("SELECT target_name_unresolved FROM links WHERE brain = 'memories' AND src_path = 'notes/edit.md'")
+            .unwrap()
+            .query_map([], |row| row.get::<_, String>(0))
+            .unwrap()
+            .filter_map(|r| r.ok())
+            .collect();
+        assert_eq!(unresolved, vec!["SecondLink".to_string()]);
+    }
+
+    // ----- DW-2.4: remove_file source-side cleanup, target-side preserved -----
+
+    #[test]
+    fn test_dw_2_4_remove_file_deletes_source_links_and_tags() {
+        let (db, tmp) = test_db();
+        let brain_dir = tmp.path().join("memories");
+        let f = create_brain_file(
+            &brain_dir,
+            "notes/doomed.md",
+            "---\nname: doomed\n---\n\n#tagx and [[Other]]",
+        );
+        index_file(db.conn(), "memories", "notes/doomed.md", &f, "notes").unwrap();
+
+        // Pre-condition: rows exist
+        let pre_links: i32 = db
+            .conn()
+            .query_row(
+                "SELECT COUNT(*) FROM links WHERE brain = 'memories' AND src_path = 'notes/doomed.md'",
+                [], |row| row.get(0),
+            )
+            .unwrap();
+        assert!(pre_links > 0);
+
+        remove_file(db.conn(), "memories", "notes/doomed.md").unwrap();
+
+        let post_links: i32 = db.conn().query_row(
+            "SELECT COUNT(*) FROM links WHERE brain = 'memories' AND src_path = 'notes/doomed.md'",
+            [], |row| row.get(0),
+        ).unwrap();
+        assert_eq!(post_links, 0);
+
+        let post_tags: i32 = db.conn().query_row(
+            "SELECT COUNT(*) FROM tags WHERE brain = 'memories' AND path = 'notes/doomed.md'",
+            [], |row| row.get(0),
+        ).unwrap();
+        assert_eq!(post_tags, 0);
+    }
+
+    #[test]
+    fn test_dw_2_4_remove_file_preserves_target_side_links() {
+        let (db, tmp) = test_db();
+        let brain_dir = tmp.path().join("memories");
+
+        // Index target first so source link resolves
+        let f_target = create_brain_file(
+            &brain_dir,
+            "notes/target.md",
+            "---\nname: target-note\n---\n\nBody",
+        );
+        index_file(db.conn(), "memories", "notes/target.md", &f_target, "notes").unwrap();
+
+        let f_src = create_brain_file(
+            &brain_dir,
+            "notes/source.md",
+            "---\nname: source\n---\n\nRefers to [[target-note]]",
+        );
+        index_file(db.conn(), "memories", "notes/source.md", &f_src, "notes").unwrap();
+
+        // Now remove the TARGET. The link row from source -> target_path
+        // should remain so source's reference shows as a broken link.
+        remove_file(db.conn(), "memories", "notes/target.md").unwrap();
+
+        let preserved: i32 = db.conn().query_row(
+            "SELECT COUNT(*) FROM links WHERE brain = 'memories' AND src_path = 'notes/source.md' \
+             AND target_path = 'notes/target.md'",
+            [], |row| row.get(0),
+        ).unwrap();
+        assert_eq!(
+            preserved, 1,
+            "target-side link row should be preserved on target removal"
+        );
     }
 
     #[test]

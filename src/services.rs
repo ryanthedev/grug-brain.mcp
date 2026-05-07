@@ -3,7 +3,8 @@ use crate::git::{
     SyncLocks,
 };
 use crate::server::DbRequest;
-use crate::types::Brain;
+use crate::types::{Brain, MemoryEvent};
+use crate::watcher::Watcher;
 use serde_json::json;
 use std::time::Duration;
 use tokio::sync::{broadcast, mpsc, oneshot};
@@ -22,6 +23,18 @@ pub struct BrainServices {
     /// Sender used to broadcast shutdown. When dropped, all receivers get a RecvError,
     /// which we use as the shutdown signal.
     _shutdown_tx: broadcast::Sender<()>,
+    /// Filesystem watcher (kept alive via field). HTTP SSE consumers obtain
+    /// receivers via `events_sender()`.
+    watcher: Option<Watcher>,
+}
+
+impl BrainServices {
+    /// Clone the broadcast sender for `MemoryEvent`s. HTTP handlers call
+    /// `subscribe()` on the result to attach a fresh receiver per client.
+    /// Returns `None` if the watcher failed to start.
+    pub fn events_sender(&self) -> Option<broadcast::Sender<MemoryEvent>> {
+        self.watcher.as_ref().map(|w| w.sender())
+    }
 }
 
 impl BrainServices {
@@ -111,9 +124,69 @@ impl BrainServices {
             });
         }
 
+        // Start filesystem watcher across all brains. Failures are non-fatal:
+        // HTTP SSE simply has no producer if this errors. Logged for ops.
+        let watcher = match Watcher::start(brains) {
+            Ok(w) => Some(w),
+            Err(e) => {
+                eprintln!("grug: watcher disabled: {e}");
+                None
+            }
+        };
+
+        // Spawn a consumer that pipes watcher events into the DB worker for
+        // reindexing. This ensures external file edits picked up by the watcher
+        // are reflected in brain_fts before the SSE-triggered browser reload
+        // queries /api/memories. Without this, the browser reloads but sees
+        // stale data because index_file was never called for the new file.
+        if let Some(ref w) = watcher {
+            let mut rx = w.sender().subscribe();
+            let reindex_tx = db_tx.clone();
+            let mut shutdown_rx2 = _shutdown_tx.subscribe();
+            tasks.push(tokio::spawn(async move {
+                loop {
+                    tokio::select! {
+                        res = rx.recv() => {
+                            match res {
+                                Ok(evt) => {
+                                    // Trigger a grug-sync for the brain that changed.
+                                    let brain_name = match &evt {
+                                        MemoryEvent::Created { brain, .. } => Some(brain.clone()),
+                                        MemoryEvent::Modified { brain, .. } => Some(brain.clone()),
+                                        MemoryEvent::Deleted { brain, .. } => Some(brain.clone()),
+                                        MemoryEvent::Renamed { brain, .. } => Some(brain.clone()),
+                                        MemoryEvent::Reload { brain, .. } => Some(brain.clone()),
+                                        MemoryEvent::Lagged(_) => None,
+                                    };
+                                    if let Some(name) = brain_name {
+                                        let (reply_tx, reply_rx) = oneshot::channel();
+                                        let _ = reindex_tx.send(DbRequest {
+                                            tool: "grug-sync".to_string(),
+                                            params: json!({"brain": name}),
+                                            reply: reply_tx,
+                                        }).await;
+                                        // Await but ignore the reply — we just want reindexing
+                                        // to happen before SSE consumers poll /api/memories.
+                                        let _ = reply_rx.await;
+                                    }
+                                }
+                                Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {
+                                    // Lagged — some events dropped; trigger full sync later.
+                                    // Non-fatal; the periodic sync timer will catch up.
+                                }
+                                Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
+                            }
+                        }
+                        _ = shutdown_rx2.recv() => break,
+                    }
+                }
+            }));
+        }
+
         BrainServices {
             tasks,
             _shutdown_tx,
+            watcher,
         }
     }
 

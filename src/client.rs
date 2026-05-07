@@ -34,6 +34,10 @@ pub struct WriteParams {
     pub content: String,
     /// Brain to write to (defaults to primary brain).
     pub brain: Option<String>,
+    /// Optional ETag-style precondition: if set and the file already exists,
+    /// the recorded mtime (milliseconds since epoch) must equal this value or
+    /// the call returns a structured conflict error and does not write.
+    pub if_match_mtime: Option<f64>,
 }
 
 #[derive(Debug, Deserialize, Serialize, JsonSchema)]
@@ -62,6 +66,9 @@ pub struct DeleteParams {
     pub path: String,
     /// Brain to delete from (defaults to primary brain).
     pub brain: Option<String>,
+    /// If true, delete the file permanently. Default (false) moves the file to
+    /// `<brain>/.trash/` so it can be recovered.
+    pub hard: Option<bool>,
 }
 
 #[derive(Debug, Deserialize, Serialize, JsonSchema)]

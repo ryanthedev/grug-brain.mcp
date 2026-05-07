@@ -95,6 +95,32 @@ pub struct RecallRow {
     pub description: String,
 }
 
+/// A filesystem-originated change to a memory file. Emitted by the
+/// `Watcher` after debouncing and self-write suppression. UI subscribers
+/// (HTTP SSE in Phase 3) consume this enum.
+///
+/// `Lagged(u64)` is a sentinel that watcher subscribers receive when they
+/// fall behind on the broadcast channel; it is NOT produced directly by the
+/// watcher (the broadcast channel hands it back from `recv()`).
+#[derive(Debug, Clone)]
+pub enum MemoryEvent {
+    /// File appeared on disk for the first time.
+    Created { brain: String, path: String, mtime: f64 },
+    /// File contents changed.
+    Modified { brain: String, path: String, mtime: f64 },
+    /// File no longer exists on disk.
+    Deleted { brain: String, path: String },
+    /// File renamed within the brain. `from` and `to` are brain-relative.
+    Renamed { brain: String, from: String, to: String, mtime: f64 },
+    /// Reload hint: a multi-file backend operation (e.g.
+    /// rename-with-link-rewrite) touched several paths atomically. Carriers
+    /// should reload all affected views in one batch instead of reacting to
+    /// per-file events.
+    Reload { brain: String, paths: Vec<String>, reason: String },
+    /// Subscriber lagged: missed `n` events. Subscribers should reload state.
+    Lagged(u64),
+}
+
 /// A document similar to a query document, with cosine similarity score.
 #[derive(Debug, Clone)]
 pub struct SimilarDoc {

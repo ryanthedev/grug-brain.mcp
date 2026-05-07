@@ -1,0 +1,288 @@
+<!doctype html>
+<html lang="en" data-theme="dark">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'self'">
+<title>grug-brain</title>
+<link rel="stylesheet" href="/styles.css?v={{STYLES_HASH}}">
+</head>
+<body>
+
+<div id="app">
+
+  <!-- ── Header ──────────────────────────────────────────────────────────── -->
+  <header id="header" aria-label="grug-brain header">
+    <span class="logo" aria-hidden="true">grug-brain</span>
+    <nav id="brain-switcher" aria-label="Brain switcher">
+      <!-- Populated by app.js render.brains() -->
+      <div id="sse-status" title="Live reload connection status" aria-hidden="true"></div>
+    </nav>
+    <button id="theme-toggle" aria-label="Switch theme (current: auto)">auto</button>
+  </header>
+
+  <!-- ── Sidebar: category tree ──────────────────────────────────────────── -->
+  <nav id="sidebar" aria-label="Categories">
+    <div id="sidebar-header">Categories</div>
+    <input
+      id="search-input"
+      type="search"
+      placeholder="Filter memories…"
+      aria-label="Filter memories"
+      autocomplete="off"
+    >
+    <ul id="category-tree" role="list" aria-label="Category list">
+      <!-- Populated by app.js render.categories() -->
+    </ul>
+  </nav>
+
+  <!-- ── Main: memory list + preview ────────────────────────────────────── -->
+  <main id="main" aria-label="Memory viewer">
+
+    <!-- Empty state (shown when the selected brain has no memories) -->
+    <div id="empty-state" role="status" aria-live="polite">
+      <div class="empty-icon" aria-hidden="true">🧠</div>
+      <div class="empty-title">No memories yet</div>
+      <p class="empty-msg">
+        Add one with <code>grug-write</code> — memories appear here automatically.
+      </p>
+    </div>
+
+    <!-- Memory list panel -->
+    <aside id="memory-list-panel" aria-label="Memory list">
+      <ul
+        id="memory-list"
+        role="listbox"
+        aria-label="Memories"
+        aria-multiselectable="false"
+      >
+        <!-- Populated by app.js render.memoryList() -->
+      </ul>
+    </aside>
+
+    <!-- Preview / editor pane -->
+    <article id="preview-panel" aria-label="Memory preview">
+
+      <!-- Edit surface controls (mode toggle, dirty marker, save) -->
+      <div id="editor-toolbar" role="toolbar" aria-label="Editor controls">
+        <button id="mode-toggle" type="button" aria-label="Toggle read/edit mode">edit</button>
+        <span id="dirty-indicator" aria-label="Unsaved changes" hidden>● unsaved</span>
+        <button id="editor-rename" type="button" aria-label="Rename memory">Rename</button>
+        <button id="editor-delete" type="button" aria-label="Delete memory">Delete</button>
+        <button id="editor-save" type="button" aria-label="Save memory">Save</button>
+        <button class="panel-expand-btn" data-panel="preview-panel" type="button"
+                aria-pressed="false" aria-label="Expand panel" style="margin-left:auto">⛶</button>
+      </div>
+
+      <!-- Read-only banner replaces editor for read-only brains -->
+      <div id="readonly-banner-host" aria-live="polite"></div>
+
+      <!-- Frontmatter form (above CodeMirror in edit mode) -->
+      <form id="frontmatter-form" aria-label="Memory frontmatter" hidden>
+        <div class="fm-row">
+          <label for="fm-name">Name</label>
+          <input id="fm-name" type="text" autocomplete="off" required aria-required="true">
+          <span id="fm-name-error" class="fm-error" role="alert" hidden></span>
+        </div>
+        <div class="fm-row">
+          <label for="fm-description">Description</label>
+          <input id="fm-description" type="text" autocomplete="off">
+        </div>
+        <div class="fm-row">
+          <label for="fm-tags">Tags</label>
+          <input id="fm-tags" type="text" autocomplete="off"
+                 aria-describedby="fm-tags-help" data-tags-count="0">
+          <small id="fm-tags-help">Comma-separated.</small>
+        </div>
+      </form>
+
+      <!-- CodeMirror editor mounts here when mode === "edit" -->
+      <div id="editor-host" aria-label="Memory body editor"></div>
+
+      <!-- Read-mode markdown preview -->
+      <div id="preview-content" aria-live="polite">
+        <!-- Populated by app.js render.preview() -->
+      </div>
+    </article>
+
+    <!-- ── Phase 5: Conflict modal ───────────────────────────────────────── -->
+    <div id="conflict-modal" class="grug-modal" role="dialog" aria-modal="true" aria-labelledby="conflict-title" hidden>
+      <div class="modal-backdrop"></div>
+      <div class="modal-body modal-body-wide">
+        <h2 id="conflict-title">Conflict — file changed on disk</h2>
+        <p class="modal-help">Your save was rejected because the file was modified by another writer.</p>
+        <div class="conflict-panes">
+          <section aria-label="Yours">
+            <h3>Yours</h3>
+            <pre id="conflict-yours" class="conflict-pane"></pre>
+          </section>
+          <section aria-label="Theirs">
+            <h3>Theirs</h3>
+            <pre id="conflict-theirs" class="conflict-pane"></pre>
+          </section>
+          <section aria-label="Merged preview">
+            <h3>Merged preview</h3>
+            <pre id="conflict-merged" class="conflict-pane conflict-diff"></pre>
+          </section>
+        </div>
+        <div class="modal-actions">
+          <button id="conflict-cancel" type="button">Cancel</button>
+          <button id="conflict-reload" type="button">Reload theirs</button>
+          <button id="conflict-overwrite" type="button">Overwrite</button>
+        </div>
+      </div>
+    </div>
+
+    <!-- ── Phase 5: Create-memory modal (first save of a draft) ──────────── -->
+    <div id="create-modal" class="grug-modal" role="dialog" aria-modal="true" aria-labelledby="create-title" hidden>
+      <div class="modal-backdrop"></div>
+      <div class="modal-body">
+        <h2 id="create-title">Name this memory</h2>
+        <p class="modal-help">Pick a filename — letters, digits, dashes, underscores.</p>
+        <div class="fm-row">
+          <label for="create-name">Name</label>
+          <input id="create-name" type="text" autocomplete="off" required aria-required="true">
+        </div>
+        <div class="modal-actions">
+          <button id="create-cancel" type="button">Cancel</button>
+          <button id="create-submit" type="button">Create</button>
+        </div>
+      </div>
+    </div>
+
+    <!-- ── Phase 5: Delete-memory modal (typed-name confirm) ─────────────── -->
+    <div id="delete-modal" class="grug-modal" role="dialog" aria-modal="true" aria-labelledby="delete-title" hidden>
+      <div class="modal-backdrop"></div>
+      <div class="modal-body">
+        <h2 id="delete-title">Delete memory</h2>
+        <p class="modal-help">Type <code id="delete-target-name"></code> to confirm.</p>
+        <div class="fm-row">
+          <label for="delete-confirm">Confirm</label>
+          <input id="delete-confirm" type="text" autocomplete="off" aria-describedby="delete-target-name">
+        </div>
+        <div class="modal-actions">
+          <button id="delete-cancel" type="button">Cancel</button>
+          <button id="delete-submit" type="button" disabled>Delete</button>
+        </div>
+      </div>
+    </div>
+
+    <!-- ── Phase 5: Rename-memory modal ──────────────────────────────────── -->
+    <div id="rename-modal" class="grug-modal" role="dialog" aria-modal="true" aria-labelledby="rename-title" hidden>
+      <div class="modal-backdrop"></div>
+      <div class="modal-body">
+        <h2 id="rename-title">Rename memory</h2>
+        <p class="modal-help">Path format: <code>category/name</code>.</p>
+        <div class="fm-row">
+          <label for="rename-new-path">New path</label>
+          <input id="rename-new-path" type="text" autocomplete="off" required>
+        </div>
+        <div class="fm-row">
+          <label for="rename-rewrite-links">Rewrite links</label>
+          <input id="rename-rewrite-links" type="checkbox" checked>
+        </div>
+        <div class="modal-actions">
+          <button id="rename-cancel" type="button">Cancel</button>
+          <button id="rename-submit" type="button">Rename</button>
+        </div>
+      </div>
+    </div>
+
+    <!-- Unsaved-changes confirmation modal -->
+    <div id="unsaved-modal" role="dialog" aria-modal="true" aria-labelledby="unsaved-title" hidden>
+      <div class="modal-backdrop"></div>
+      <div class="modal-body">
+        <h2 id="unsaved-title">Unsaved changes</h2>
+        <p>You have unsaved edits. Discard them?</p>
+        <div class="modal-actions">
+          <button id="unsaved-cancel" type="button">Cancel</button>
+          <button id="unsaved-discard" type="button">Discard</button>
+        </div>
+      </div>
+    </div>
+
+  </main>
+
+  <!-- ── Graph panel ─────────────────────────────────────────────────────── -->
+  <aside id="graph-panel" aria-label="Similarity graph">
+    <div id="graph-header">
+      <span>Graph</span>
+      <div style="display:flex;gap:4px;align-items:center">
+        <button id="graph-mode-toggle" type="button" aria-pressed="false"
+                aria-label="Toggle global / local-N-hop graph view">global</button>
+        <button class="panel-expand-btn" data-panel="graph-panel" type="button"
+                aria-pressed="false" aria-label="Expand panel">⛶</button>
+      </div>
+    </div>
+    <div id="cy" aria-label="Memory similarity graph" role="img"></div>
+  </aside>
+
+  <!-- ── Phase 6: side panels (backlinks, outline, tag pane) ─────────────── -->
+  <aside id="side-panels" aria-label="Side panels">
+    <section id="panel-backlinks" class="side-panel" aria-label="Backlinks">
+      <header class="side-panel-header">
+        <button class="side-panel-toggle" type="button" aria-expanded="true"
+                aria-controls="panel-backlinks-body">Backlinks</button>
+      </header>
+      <div id="panel-backlinks-body" class="side-panel-body">
+        <p class="side-panel-empty">Open a memory to see who links to it.</p>
+      </div>
+    </section>
+
+    <section id="panel-outline" class="side-panel" aria-label="Outline">
+      <header class="side-panel-header">
+        <button class="side-panel-toggle" type="button" aria-expanded="true"
+                aria-controls="panel-outline-body">Outline</button>
+      </header>
+      <div id="panel-outline-body" class="side-panel-body">
+        <p class="side-panel-empty">Open a memory to see its headings.</p>
+      </div>
+    </section>
+
+    <section id="panel-tags" class="side-panel" aria-label="Tags">
+      <header class="side-panel-header">
+        <button class="side-panel-toggle" type="button" aria-expanded="true"
+                aria-controls="panel-tags-body">Tags</button>
+      </header>
+      <div id="panel-tags-body" class="side-panel-body">
+        <p class="side-panel-empty">No tags yet.</p>
+      </div>
+    </section>
+  </aside>
+
+  <!-- ── Phase 6: Cmd-K palette ──────────────────────────────────────────── -->
+  <div id="palette-modal" class="grug-modal" role="dialog" aria-modal="true"
+       aria-labelledby="palette-title" hidden>
+    <div class="modal-backdrop"></div>
+    <div class="modal-body modal-body-palette">
+      <h2 id="palette-title" class="visually-hidden">Command palette</h2>
+      <input id="palette-input" type="text" autocomplete="off"
+             placeholder="Type to search memories, categories, commands..."
+             aria-label="Palette search"
+             aria-autocomplete="list"
+             aria-controls="palette-list"
+             aria-expanded="true"
+             role="combobox" />
+      <ul id="palette-list" role="listbox" aria-label="Palette results"></ul>
+    </div>
+  </div>
+
+</div><!-- #app -->
+
+<!-- Reload indicator (shown briefly after SSE-triggered reload) -->
+<div id="reload-indicator" aria-hidden="true">↻ reloaded</div>
+
+<!-- Error toast container -->
+<div id="toast-container" aria-label="Notifications" role="region"></div>
+
+<!-- Vendored dependencies loaded first so app.js can reference them. -->
+<script src="/vendor/graphology.min.js?v={{GRAPHOLOGY_HASH}}"></script>
+<script src="/vendor/sigma.min.js?v={{SIGMA_HASH}}"></script>
+<script src="/vendor/dompurify.min.js?v={{DOMPURIFY_HASH}}"></script>
+<script src="/vendor/marked.min.js?v={{MARKED_HASH}}"></script>
+<script src="/vendor/codemirror.min.js?v={{CODEMIRROR_HASH}}"></script>
+<script src="/vendor/jsdiff.min.js?v={{JSDIFF_HASH}}"></script>
+<script type="module" src="/app.js?v={{APP_JS_HASH}}"></script>
+
+</body>
+</html>

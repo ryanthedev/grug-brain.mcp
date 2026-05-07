@@ -17,7 +17,7 @@ use tokio::sync::{mpsc, oneshot, Mutex};
 const GIT_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// Content for .gitignore in newly initialized repos.
-const GITIGNORE_CONTENT: &str = "*.db\n*.db-wal\n*.db-shm\nrecall.md\nlocal/\n.grugignore\n";
+const GITIGNORE_CONTENT: &str = "*.db\n*.db-wal\n*.db-shm\nrecall.md\nlocal/\n.grugignore\n.trash/\n";
 
 /// Per-brain mutex map preventing concurrent git operations on the same brain.
 pub type SyncLocks = Arc<HashMap<String, Arc<Mutex<()>>>>;

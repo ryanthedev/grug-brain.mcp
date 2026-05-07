@@ -1,7 +1,7 @@
 use rusqlite::{Connection, Result as SqlResult};
 use std::path::Path;
 
-pub const SCHEMA_VERSION: i32 = 6;
+pub const SCHEMA_VERSION: i32 = 7;
 
 /// Initialize the grug database at the given path.
 /// Creates all tables if they don't exist.
@@ -38,7 +38,9 @@ pub fn init_db(db_path: &Path) -> SqlResult<Connection> {
              DROP TABLE IF EXISTS term_weights;
              DROP TABLE IF EXISTS doc_norms;
              DROP TABLE IF EXISTS dream_log;
-             DROP TABLE IF EXISTS cross_links;",
+             DROP TABLE IF EXISTS cross_links;
+             DROP TABLE IF EXISTS links;
+             DROP TABLE IF EXISTS tags;",
         )?;
         conn.execute(
             "INSERT OR REPLACE INTO meta (key, value) VALUES ('schema_version', ?1)",
@@ -91,7 +93,27 @@ pub fn init_db(db_path: &Path) -> SqlResult<Connection> {
             path TEXT NOT NULL,
             norm REAL NOT NULL,
             PRIMARY KEY (brain, path)
-        );",
+        );
+
+        CREATE TABLE IF NOT EXISTS links (
+            brain TEXT NOT NULL,
+            src_path TEXT NOT NULL,
+            target_brain TEXT,
+            target_path TEXT,
+            target_name_unresolved TEXT,
+            created_at TEXT NOT NULL,
+            PRIMARY KEY (brain, src_path, target_brain, target_path, target_name_unresolved)
+        );
+        CREATE INDEX IF NOT EXISTS idx_links_target ON links (target_brain, target_path);
+        CREATE INDEX IF NOT EXISTS idx_links_src ON links (brain, src_path);
+
+        CREATE TABLE IF NOT EXISTS tags (
+            brain TEXT NOT NULL,
+            path TEXT NOT NULL,
+            tag TEXT NOT NULL,
+            PRIMARY KEY (brain, path, tag)
+        );
+        CREATE INDEX IF NOT EXISTS idx_tags_tag ON tags (tag);",
     )?;
 
     Ok(conn)
@@ -115,7 +137,7 @@ mod tests {
                 |row| row.get(0),
             )
             .unwrap();
-        assert_eq!(version, "6");
+        assert_eq!(version, "7");
 
         // Verify files table works
         conn.execute(
@@ -199,7 +221,7 @@ mod tests {
                 |row| row.get(0),
             )
             .unwrap();
-        assert_eq!(version, "6");
+        assert_eq!(version, "7");
 
         // Old data should be gone (table was dropped and recreated)
         let count: i32 = conn
@@ -327,6 +349,141 @@ mod tests {
     }
 
     #[test]
+    fn test_dw_1_1_phase1_schema_version_7() {
+        let tmp = NamedTempFile::new().unwrap();
+        let conn = init_db(tmp.path()).unwrap();
+        let version: String = conn
+            .query_row(
+                "SELECT value FROM meta WHERE key = 'schema_version'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(version, "7", "schema bumped for links/tags tables");
+    }
+
+    #[test]
+    fn test_dw_1_1_links_table_exists() {
+        let tmp = NamedTempFile::new().unwrap();
+        let conn = init_db(tmp.path()).unwrap();
+
+        // Resolved within-brain link
+        conn.execute(
+            "INSERT INTO links (brain, src_path, target_brain, target_path, target_name_unresolved, created_at)
+             VALUES ('memories', 'notes/a.md', 'memories', 'notes/b.md', NULL, '2026-05-04')",
+            [],
+        )
+        .unwrap();
+
+        // Unresolved link (target_path NULL, target_name_unresolved set)
+        conn.execute(
+            "INSERT INTO links (brain, src_path, target_brain, target_path, target_name_unresolved, created_at)
+             VALUES ('memories', 'notes/a.md', NULL, NULL, 'Floating Reference', '2026-05-04')",
+            [],
+        )
+        .unwrap();
+
+        let count: i32 = conn
+            .query_row("SELECT COUNT(*) FROM links", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(count, 2);
+
+        // Index on target should exist (use EXPLAIN QUERY PLAN to confirm it would be used).
+        // Simpler: query by target columns and verify it returns.
+        let by_target: i32 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM links WHERE target_brain = 'memories' AND target_path = 'notes/b.md'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(by_target, 1);
+
+        // Index on src should support lookup by source
+        let by_src: i32 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM links WHERE brain = 'memories' AND src_path = 'notes/a.md'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(by_src, 2);
+    }
+
+    #[test]
+    fn test_dw_1_1_tags_table_exists() {
+        let tmp = NamedTempFile::new().unwrap();
+        let conn = init_db(tmp.path()).unwrap();
+
+        conn.execute(
+            "INSERT INTO tags (brain, path, tag) VALUES ('memories', 'notes/a.md', 'rust')",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO tags (brain, path, tag) VALUES ('memories', 'notes/a.md', 'systems')",
+            [],
+        )
+        .unwrap();
+
+        // PK on (brain, path, tag) -- duplicate should fail
+        let dup = conn.execute(
+            "INSERT INTO tags (brain, path, tag) VALUES ('memories', 'notes/a.md', 'rust')",
+            [],
+        );
+        assert!(dup.is_err(), "duplicate (brain, path, tag) should violate PK");
+
+        // Index on tag supports tag-based lookup
+        let by_tag: i32 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM tags WHERE tag = 'rust'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(by_tag, 1);
+    }
+
+    #[test]
+    fn test_dw_1_1_migration_drops_links_and_tags() {
+        let tmp = NamedTempFile::new().unwrap();
+        // Pre-seed at version 6 with links + tags rows
+        {
+            let conn = Connection::open(tmp.path()).unwrap();
+            conn.execute_batch(
+                "CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT);
+                 INSERT INTO meta VALUES ('schema_version', '6');
+                 CREATE TABLE links (brain TEXT, src_path TEXT, target_brain TEXT, target_path TEXT, target_name_unresolved TEXT, created_at TEXT);
+                 CREATE TABLE tags (brain TEXT, path TEXT, tag TEXT);
+                 INSERT INTO links VALUES ('m', 'a.md', 'm', 'b.md', NULL, '2026-01-01');
+                 INSERT INTO tags VALUES ('m', 'a.md', 'rust');",
+            )
+            .unwrap();
+        }
+
+        let conn = init_db(tmp.path()).unwrap();
+
+        let version: String = conn
+            .query_row(
+                "SELECT value FROM meta WHERE key = 'schema_version'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(version, "7");
+
+        let links: i32 = conn
+            .query_row("SELECT COUNT(*) FROM links", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(links, 0, "links should be empty after migration");
+
+        let tags: i32 = conn
+            .query_row("SELECT COUNT(*) FROM tags", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(tags, 0, "tags should be empty after migration");
+    }
+
+    #[test]
     fn test_dw_1_2_migration_drops_all_tables() {
         let tmp = NamedTempFile::new().unwrap();
 
@@ -381,7 +538,7 @@ mod tests {
                 |row| row.get(0),
             )
             .unwrap();
-        assert_eq!(version, "6");
+        assert_eq!(version, "7");
 
         // All old data should be gone
         let dream_count: i32 = conn
