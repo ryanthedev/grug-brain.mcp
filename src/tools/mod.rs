@@ -34,6 +34,9 @@ pub struct GitCommitRequest {
     pub action: String,
 }
 
+/// Per-(brain, path) lock entry.
+type PathLockEntry = Arc<Mutex<()>>;
+
 /// Per-(brain, path) mutex map. Serializes the read-mtime / check-conflict /
 /// write / index sequence within a single tool call so it composes with future
 /// parallel write paths (HTTP layer in plan-1 phase 3).
@@ -42,7 +45,7 @@ pub struct GitCommitRequest {
 /// rather than a current correctness fix. Cheap when uncontended.
 #[derive(Default)]
 pub struct PathLocks {
-    inner: Mutex<HashMap<(String, String), Arc<Mutex<()>>>>,
+    inner: Mutex<HashMap<(String, String), PathLockEntry>>,
 }
 
 impl PathLocks {

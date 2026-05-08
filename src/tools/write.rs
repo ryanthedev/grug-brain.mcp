@@ -64,30 +64,30 @@ pub fn grug_write(
 
     let exists = file_path.exists();
 
-    if let Some(want) = if_match_mtime {
-        if exists {
-            let current_mtime: Option<f64> = db
-                .conn()
-                .query_row(
-                    "SELECT mtime FROM files WHERE brain = ?1 AND path = ?2",
-                    rusqlite::params![&brain.name, &rel_path],
-                    |row| row.get(0),
-                )
-                .ok();
+    if let Some(want) = if_match_mtime
+        && exists
+    {
+        let current_mtime: Option<f64> = db
+            .conn()
+            .query_row(
+                "SELECT mtime FROM files WHERE brain = ?1 AND path = ?2",
+                rusqlite::params![&brain.name, &rel_path],
+                |row| row.get(0),
+            )
+            .ok();
 
-            // Treat unindexed-but-on-disk files as "no recorded mtime" -- we
-            // refuse to overwrite without an explicit force.
-            let current = current_mtime.unwrap_or(0.0);
-            if (current - want).abs() > f64::EPSILON {
-                let current_content =
-                    fs::read_to_string(&file_path).unwrap_or_default();
-                let body = json!({
-                    "error": "conflict",
-                    "current_mtime": current,
-                    "current_content": current_content,
-                });
-                return Err(serde_json::to_string(&body).unwrap_or_else(|_| body.to_string()));
-            }
+        // Treat unindexed-but-on-disk files as "no recorded mtime" -- we
+        // refuse to overwrite without an explicit force.
+        let current = current_mtime.unwrap_or(0.0);
+        if (current - want).abs() > f64::EPSILON {
+            let current_content =
+                fs::read_to_string(&file_path).unwrap_or_default();
+            let body = json!({
+                "error": "conflict",
+                "current_mtime": current,
+                "current_content": current_content,
+            });
+            return Err(serde_json::to_string(&body).unwrap_or_else(|_| body.to_string()));
         }
     }
 

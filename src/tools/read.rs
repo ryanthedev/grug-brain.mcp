@@ -20,13 +20,13 @@ pub fn grug_read(
     }
 
     // Case 2: Category only (no brain, no path) -> backwards-compat search
-    if brain_name.is_none() && category.is_some() && path_name.is_none() {
-        return read_category_compat(db, category.unwrap());
+    if let (None, Some(cat), None) = (brain_name, category, path_name) {
+        return read_category_compat(db, cat);
     }
 
     // Case 3: Path only (no brain, no category) -> try primary brain
-    if brain_name.is_none() && category.is_none() && path_name.is_some() {
-        return read_path_compat(db, path_name.unwrap());
+    if let (None, None, Some(pn)) = (brain_name, category, path_name) {
+        return read_path_compat(db, pn);
     }
 
     let brain = db.resolve_brain(brain_name)?.clone();
@@ -37,8 +37,8 @@ pub fn grug_read(
     }
 
     // Case 5: Brain + category -> list files
-    if category.is_some() && path_name.is_none() {
-        return list_category_files(db, &brain.name, category.unwrap());
+    if let (Some(cat), None) = (category, path_name) {
+        return list_category_files(db, &brain.name, cat);
     }
 
     // Case 6: Brain + category + path -> read file
@@ -48,7 +48,7 @@ pub fn grug_read(
     });
     let raw_name = path_name.unwrap();
     let file = if raw_name.contains('/') {
-        raw_name.split('/').last().unwrap_or(raw_name)
+        raw_name.split('/').next_back().unwrap_or(raw_name)
     } else {
         raw_name
     };
@@ -178,7 +178,7 @@ fn read_path_compat(db: &GrugDb, name: &str) -> Result<String, String> {
     let primary = db.config().primary_brain().clone();
     let cat = name.split('/').next().unwrap_or(name);
     let file = if name.contains('/') {
-        name.split('/').last().unwrap_or(name)
+        name.split('/').next_back().unwrap_or(name)
     } else {
         name
     };

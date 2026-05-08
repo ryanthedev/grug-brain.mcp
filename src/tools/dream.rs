@@ -399,7 +399,7 @@ fn diversity_filter(candidates: &[CrossLinkCandidate], limit: usize) -> Vec<&Cro
         }
 
         // Build sorted category pair key
-        let mut pair = vec![candidate.cat_a.as_str(), candidate.cat_b.as_str()];
+        let mut pair = [candidate.cat_a.as_str(), candidate.cat_b.as_str()];
         pair.sort();
         let pair_key = format!("{}:{}", pair[0], pair[1]);
 

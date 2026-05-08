@@ -252,10 +252,10 @@ pub fn sync_brain(conn: &Connection, brain: &Brain) -> Result<(usize, usize, usi
             on_disk.insert(rel_path.clone());
 
             let mtime = file_mtime_ms(&full_path);
-            if indexed.get(&rel_path).copied() != Some(mtime) {
-                if index_file(conn, &brain.name, &rel_path, &full_path, &brain.name).is_ok() {
-                    indexed_count += 1;
-                }
+            if indexed.get(&rel_path).copied() != Some(mtime)
+                && index_file(conn, &brain.name, &rel_path, &full_path, &brain.name).is_ok()
+            {
+                indexed_count += 1;
             }
         }
     } else {
@@ -273,10 +273,10 @@ pub fn sync_brain(conn: &Connection, brain: &Brain) -> Result<(usize, usize, usi
                 on_disk.insert(rel_path.clone());
 
                 let mtime = file_mtime_ms(&full_path);
-                if indexed.get(&rel_path).copied() != Some(mtime) {
-                    if index_file(conn, &brain.name, &rel_path, &full_path, &cat).is_ok() {
-                        indexed_count += 1;
-                    }
+                if indexed.get(&rel_path).copied() != Some(mtime)
+                    && index_file(conn, &brain.name, &rel_path, &full_path, &cat).is_ok()
+                {
+                    indexed_count += 1;
                 }
             }
         }
@@ -285,10 +285,10 @@ pub fn sync_brain(conn: &Connection, brain: &Brain) -> Result<(usize, usize, usi
     // Remove files that are indexed but no longer on disk
     let mut removed_count = 0;
     for path in indexed.keys() {
-        if !on_disk.contains(path) {
-            if remove_file(conn, &brain.name, path).is_ok() {
-                removed_count += 1;
-            }
+        if !on_disk.contains(path)
+            && remove_file(conn, &brain.name, path).is_ok()
+        {
+            removed_count += 1;
         }
     }
 

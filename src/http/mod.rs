@@ -40,10 +40,10 @@ pub const DEFAULT_PORT: u16 = 7777;
 /// Path of the chosen-port advertisement file. Honors `GRUG_PORT_FILE` so
 /// tests can isolate this side effect without racing on `~/.grug-brain/`.
 pub fn default_port_file() -> PathBuf {
-    if let Ok(p) = std::env::var("GRUG_PORT_FILE") {
-        if !p.is_empty() {
-            return PathBuf::from(p);
-        }
+    if let Ok(p) = std::env::var("GRUG_PORT_FILE")
+        && !p.is_empty()
+    {
+        return PathBuf::from(p);
     }
     expand_home("~/.grug-brain/serve.port")
 }

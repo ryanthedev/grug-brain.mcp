@@ -29,17 +29,13 @@ pub fn fts_search(
     offset: usize,
 ) -> (Vec<SearchResult>, usize) {
     // Try the query as-is first
-    match fts_search_inner(conn, fts_query, limit, offset) {
-        Ok(result) => return result,
-        Err(_) => {}
+    if let Ok(result) = fts_search_inner(conn, fts_query, limit, offset) {
+        return result;
     }
 
     // Fallback: strip wildcards
     let simple = fts_query.replace('*', "");
-    match fts_search_inner(conn, &simple, limit, offset) {
-        Ok(result) => result,
-        Err(_) => (vec![], 0),
-    }
+    fts_search_inner(conn, &simple, limit, offset).unwrap_or_default()
 }
 
 fn fts_search_inner(
@@ -124,7 +120,7 @@ pub fn grug_search(db: &mut super::GrugDb, query: &str, page: Option<usize>) -> 
         lines.push(format!("{}{} [{}] [{}]\n  {}", r.path, date, r.category, r.brain, snippet));
     }
 
-    let total_pages = (total + SEARCH_PAGE_SIZE - 1) / SEARCH_PAGE_SIZE;
+    let total_pages = total.div_ceil(SEARCH_PAGE_SIZE);
     let paging = if total_pages > 1 {
         format!("\n--- page {p}/{total_pages} | page:{} for more ---", p + 1)
     } else {

@@ -335,13 +335,12 @@ fn flush_event(
     {
         let mut g = suppression.lock().expect("suppression poisoned");
         let key = (brain.to_string(), rel_path.to_string());
-        if let Some((expected_mtime, when)) = g.get(&key).copied() {
-            if Instant::now().duration_since(when) < SUPPRESS_TTL
-                && (mtime_ms - expected_mtime).abs() < f64::EPSILON
-            {
-                g.remove(&key);
-                return;
-            }
+        if let Some((expected_mtime, when)) = g.get(&key).copied()
+            && Instant::now().duration_since(when) < SUPPRESS_TTL
+            && (mtime_ms - expected_mtime).abs() < f64::EPSILON
+        {
+            g.remove(&key);
+            return;
         }
     }
 

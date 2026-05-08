@@ -1,5 +1,5 @@
-<!-- base-commit: 8d5378f -->
-<!-- generated: 2026-05-06 -->
+<!-- base-commit: 052c836 -->
+<!-- generated: 2026-05-08 -->
 
 # Code Standards — grug-brain
 
@@ -7,17 +7,19 @@
 
 Single-binary Rust MCP server + in-process axum HTTP server + vanilla-JS web viewer.
 - `src/main.rs` → `src/client.rs` (MCP tool definitions) → `src/server.rs` (dispatch loop, owns the DB thread).
-- All tool logic in `src/tools/*.rs`, one file per tool. Shared state via `GrugDb`.
-- `src/http/` runs the read-only HTTP/SSE API beside the MCP socket. Handlers send `__http/*` requests through `db_tx` to the DB thread; never touch SQLite directly.
+- `src/domain/ports.rs` — the readable map of the system. Every MCP tool and HTTP endpoint has a trait method here. Read this file to know every operation that exists.
+- `src/adapters/sqlite/` — `GrugDb` implements all port traits; one file per trait group. HTTP and MCP adapters call `db.method()` through traits.
+- `src/http/` — per-concern axum handler files (memories, search, graph, write, helpers). Handlers call `db_tx` with `__http/*` routes; never touch SQLite directly.
+- `src/tools/*.rs` — utility modules (dream, rename, similarity, tfidf, indexing) called from adapter impls. Not called by dispatch arms directly.
 - `web/` is vendored vanilla JS (no build step). sigma.js/graphology/CodeMirror 6/DOMPurify/marked/jsdiff are checked into `web/vendor/`.
 
-Data flow: markdown files → `walker.rs` → `indexing.rs` → SQLite FTS5 → tools query → returned as formatted strings or JSON. Watcher (`src/watcher.rs`) notifies the server, which broadcasts to SSE subscribers.
+Data flow: markdown files → `walker.rs` → `indexing.rs` → SQLite FTS5 → `GrugDb` trait method → returned as formatted strings or JSON. Watcher (`src/watcher.rs`) notifies the server, which broadcasts to SSE subscribers.
 
 ## Naming
 
 - Tool files: `src/tools/{verb}.rs` (e.g., `search.rs`, `dream.rs`, `write.rs`)
 - Public functions: `grug_{tool}(db: &mut GrugDb, ...)` pattern
-- HTTP handlers: short verb names in `src/http/handlers.rs` (`brains`, `memories`, `preview`, `healthz`)
+- HTTP handlers: short verb names in `src/http/{memories,search,graph,write}.rs` (`brains`, `memories`, `preview`, `healthz`)
 - DB-thread routes: `__http/{name}` matching the handler
 - Test helpers: `src/tools/mod.rs::test_helpers`
 - Frontend modules: lowercase namespaces inside the outer IIFE (`api`, `state`, `render`, `router`, `sse`, `graph`, `toast`, `theme`, `editor`, `save`, `conflict`, `crud`, `autocomplete`, `palette`, etc.) — each is `const x = (() => { ... return { api }; })();`
@@ -25,11 +27,12 @@ Data flow: markdown files → `walker.rs` → `indexing.rs` → SQLite FTS5 → 
 
 ## Imports
 
-- `use super::GrugDb` in tool files for the shared db wrapper
+- `use super::GrugDb` in tool/adapter files for the shared db wrapper
 - `use crate::types::*` for shared types
+- `use crate::domain::ports::TraitName` in adapter files — one import per trait implemented
 - `rusqlite::params!` macro for parameterized queries
 - HTTP handlers go through `call_db(&state.db_tx, "__http/route", payload)` — no direct SQLite access
-- Frontend: no module bundler. Everything is one IIFE in `web/app.js`. Vendor libs loaded via `<script>` in `web/index.html`.
+- Frontend: ES modules in `web/src/`, loaded from `web/index.html` with `type="module"`. No bundler.
 
 ## Error Handling
 
@@ -47,19 +50,30 @@ src/
   helpers.rs       — path validation, frontmatter assembly
   walker.rs        — filesystem walking
   watcher.rs       — notify-rs file watcher → broadcast channel
-  types.rs         — shared structs
+  types.rs         — shared structs (Brain, Memory, SearchResult, etc.)
+  domain/
+    ports.rs       — ALL operation traits (10 traits, 24 methods); the system index
+  adapters/
+    sqlite/
+      mod.rs       — re-exports all trait impls
+      {concern}.rs — impl TraitName for GrugDb (brains, memories, search, graph, write, ...)
   tools/
-    mod.rs         — GrugDb + test_helpers
-    {tool}.rs
+    mod.rs         — GrugDb + PathLocks + test_helpers
+    {utility}.rs   — utility modules (dream, rename, similarity, tfidf, indexing, ...)
   http/
     mod.rs         — AppState, router, listen
-    handlers.rs    — axum handlers + DB-thread JSON producers
+    memories.rs    — GET /api/memories, /api/memory, /api/tags, /api/backlinks
+    search.rs      — GET /api/search, /api/quickswitch
+    graph.rs       — GET /api/graph, /api/graph_local
+    write.rs       — POST/PUT/DELETE /api/memory
+    helpers.rs     — shared axum helpers
     security.rs    — Host/CORS/CSRF/CSP middleware
     sse.rs         — SSE channel
     assets.rs      — rust-embed for web/ + content-hash
 web/
-  index.html / app.js / styles.css
-  vendor/          — cytoscape, dompurify, marked (vendored, not npm)
+  index.html / styles.css
+  src/             — ES modules (one file per concern)
+  vendor/          — sigma, graphology, dompurify, marked, jsdiff (vendored, not npm)
 tests/
   http_integration.rs / socket_integration.rs
   playwright/      — Playwright suite (one spec per DW item)
@@ -88,6 +102,7 @@ tests/
 
 ## Forbidden Patterns
 
+- **No new dispatch arms without a corresponding `ports.rs` trait method** — every MCP tool and HTTP endpoint must have a doc-commented trait method in `src/domain/ports.rs`. The compile-time tests in `ports.rs` enforce this.
 - **No direct SQLite access from HTTP handlers** — always go through `db_tx` + `__http/*` routes. The DB thread is single-writer; bypassing it races.
 - **No raw `innerHTML` from user data.** Use `textContent` or `escapeHtml()`. Markdown body MUST go through DOMPurify with the existing allowlist.
 - **No `.unwrap()` on user paths.** Always `map_err` or handle gracefully. `validate_memory_path` for anything that touches the filesystem.
@@ -97,8 +112,9 @@ tests/
 
 ## Similar Implementations
 
-- HTTP handler + DB route pair: `src/http/handlers.rs::preview` ↔ `preview_json` (DB-thread side) — copy this shape for new endpoints.
-- Write-path with ETag: `src/tools/write.rs` (Plan 1 Phase 1 hardening; mtime-based ETag, conflict returns Err).
+- New operation (add to both transports): define trait method in `src/domain/ports.rs`, implement in `src/adapters/sqlite/{concern}.rs`, wire in `src/server.rs` dispatch arm.
+- HTTP handler example: `src/http/memories.rs::memories` → `call_db("__http/memories", ...)` → `src/adapters/sqlite/memories.rs::memories_json`.
+- Write-path with ETag: `src/tools/write.rs` (mtime-based ETag, conflict returns Err).
 - Watcher → SSE fan-out: `src/watcher.rs` + `src/http/sse.rs`.
 - Frontend pub-sub: `web/app.js` `state` IIFE + `state.subscribe(render)`.
 - Graph render: `web/app.js` `graph.*` namespace — `renderGraph` is `async` (yields via rAF+setTimeout before heavy work). Only renders nodes with at least one edge; falls back to all nodes when no edges exist. Layout: category radial for >50 nodes, Fruchterman-Reingold for ≤50.

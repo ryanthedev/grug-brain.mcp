@@ -78,7 +78,7 @@ pub fn paginate(text: &str, page: usize) -> String {
     if lines.len() <= PAGE_SIZE {
         return text.to_string();
     }
-    let total_pages = (lines.len() + PAGE_SIZE - 1) / PAGE_SIZE;
+    let total_pages = lines.len().div_ceil(PAGE_SIZE);
     let p = page.max(1).min(total_pages);
     let start = (p - 1) * PAGE_SIZE;
     let end = (start + PAGE_SIZE).min(lines.len());

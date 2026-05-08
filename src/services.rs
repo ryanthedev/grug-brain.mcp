@@ -78,27 +78,27 @@ impl BrainServices {
             }
 
             // Refresh timer for read-only brains with source
-            if !brain.writable && brain.source.is_some() {
-                if let Some(refresh_s) = brain.refresh_interval {
-                    let clamped = refresh_s.max(MIN_REFRESH_INTERVAL_S);
-                    if clamped != refresh_s {
-                        eprintln!(
-                            "grug: refresh interval for {} clamped to {}s (was {}s)",
-                            brain.name, clamped, refresh_s
-                        );
-                    }
-                    let handle = spawn_refresh_timer(
-                        brain.clone(),
-                        db_tx.clone(),
-                        _shutdown_tx.subscribe(),
-                        clamped,
-                    );
-                    tasks.push(handle);
+            if !brain.writable && brain.source.is_some()
+                && let Some(refresh_s) = brain.refresh_interval
+            {
+                let clamped = refresh_s.max(MIN_REFRESH_INTERVAL_S);
+                if clamped != refresh_s {
                     eprintln!(
-                        "grug: refresh enabled for {} ({}s interval)",
-                        brain.name, clamped
+                        "grug: refresh interval for {} clamped to {}s (was {}s)",
+                        brain.name, clamped, refresh_s
                     );
                 }
+                let handle = spawn_refresh_timer(
+                    brain.clone(),
+                    db_tx.clone(),
+                    _shutdown_tx.subscribe(),
+                    clamped,
+                );
+                tasks.push(handle);
+                eprintln!(
+                    "grug: refresh enabled for {} ({}s interval)",
+                    brain.name, clamped
+                );
             }
         }
 

@@ -102,10 +102,10 @@ pub async fn git(brain_dir: &Path, args: &[&str]) -> Option<String> {
 
 /// Ensure a brain directory is a git repository. Initializes if needed.
 pub async fn ensure_git_repo(brain: &Brain) -> bool {
-    if let Some(result) = git(&brain.dir, &["rev-parse", "--git-dir"]).await {
-        if result == ".git" {
-            return true;
-        }
+    if let Some(result) = git(&brain.dir, &["rev-parse", "--git-dir"]).await
+        && result == ".git"
+    {
+        return true;
     }
     if git(&brain.dir, &["init"]).await.is_none() {
         return false;
@@ -163,10 +163,10 @@ pub fn is_local_file(brain_dir: &Path, rel_path: &str, content: Option<&str>) ->
         if pattern.contains('*') {
             let escaped = regex::escape(pattern)
                 .replace(r"\*", ".*");
-            if let Ok(re) = Regex::new(&format!("^{escaped}$")) {
-                if re.is_match(rel_path) {
-                    return true;
-                }
+            if let Ok(re) = Regex::new(&format!("^{escaped}$"))
+                && re.is_match(rel_path)
+            {
+                return true;
             }
         }
         if rel_path == pattern || rel_path.starts_with(&format!("{pattern}/")) {
@@ -194,10 +194,10 @@ pub async fn sync_git_exclude(brain: &Brain) {
     for full_path in walk_files(&brain.dir) {
         if let Ok(content) = fs::read_to_string(&full_path) {
             let fm = extract_frontmatter(&content);
-            if fm.get("sync").map(|v| v.as_str()) == Some("false") {
-                if let Ok(rel) = full_path.strip_prefix(&brain.dir) {
-                    lines.push(rel.to_string_lossy().to_string());
-                }
+            if fm.get("sync").map(|v| v.as_str()) == Some("false")
+                && let Ok(rel) = full_path.strip_prefix(&brain.dir)
+            {
+                lines.push(rel.to_string_lossy().to_string());
             }
         }
     }
@@ -214,11 +214,10 @@ pub async fn sync_git_exclude(brain: &Brain) {
 /// Skips if a sync lock is held (sync will pick up changes).
 pub async fn git_commit_file(brain: &Brain, rel_path: &str, action: &str, locks: &SyncLocks) {
     // Check if sync lock is held -- if so, skip (sync will commit)
-    if let Some(lock) = locks.get(&brain.name) {
-        if lock.try_lock().is_err() {
-            return; // Sync in progress, it will pick up changes
-        }
-        // Lock acquired and immediately dropped -- we're clear to proceed
+    if let Some(lock) = locks.get(&brain.name)
+        && lock.try_lock().is_err()
+    {
+        return; // Sync in progress, it will pick up changes
     }
 
     if !ensure_git_repo(brain).await {
@@ -227,11 +226,11 @@ pub async fn git_commit_file(brain: &Brain, rel_path: &str, action: &str, locks:
 
     if action != "delete" {
         let full_path = brain.dir.join(rel_path);
-        if let Ok(content) = fs::read_to_string(&full_path) {
-            if is_local_file(&brain.dir, rel_path, Some(&content)) {
-                sync_git_exclude(brain).await;
-                return;
-            }
+        if let Ok(content) = fs::read_to_string(&full_path)
+            && is_local_file(&brain.dir, rel_path, Some(&content))
+        {
+            sync_git_exclude(brain).await;
+            return;
         }
     }
 

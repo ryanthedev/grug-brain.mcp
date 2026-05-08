@@ -297,10 +297,8 @@ fn find_referrer_paths(
             row.get::<_, String>(0)
         })
         .map_err(|e| format!("query resolved: {e}"))?;
-    for r in rows {
-        if let Ok(s) = r {
-            set.insert(s);
-        }
+    for s in rows.flatten() {
+        set.insert(s);
     }
 
     // Build the list of "name forms" we'll match unresolved targets against:
@@ -311,10 +309,10 @@ fn find_referrer_paths(
         cat_slug.clone(),
         cat_slug_md.clone(),
     ];
-    if let Some(n) = old_name {
-        if !n.is_empty() && n != old_slug {
-            exact_forms.push(n.to_string());
-        }
+    if let Some(n) = old_name
+        && !n.is_empty() && n != old_slug
+    {
+        exact_forms.push(n.to_string());
     }
 
     // Unresolved by bare/path/name forms, exact match.
@@ -338,10 +336,8 @@ fn find_referrer_paths(
             row.get::<_, String>(0)
         })
         .map_err(|e| format!("query unresolved: {e}"))?;
-    for r in rows {
-        if let Ok(s) = r {
-            set.insert(s);
-        }
+    for s in rows.flatten() {
+        set.insert(s);
     }
 
     // Unresolved aliased forms: `target|alias` is stored verbatim by the
@@ -374,10 +370,8 @@ fn find_referrer_paths(
             row.get::<_, String>(0)
         })
         .map_err(|e| format!("query unresolved-alias: {e}"))?;
-    for r in rows {
-        if let Ok(s) = r {
-            set.insert(s);
-        }
+    for s in rows.flatten() {
+        set.insert(s);
     }
 
     let mut out: Vec<String> = set.into_iter().collect();
@@ -650,10 +644,10 @@ impl Drop for StagingGuard {
         if let Some((new_full, old_full)) = &self.main_rename {
             let _ = fs::rename(new_full, old_full);
             // Restore pre-frontmatter-rewrite bytes if we mutated them.
-            if let Some((path, bytes)) = &self.main_pre_bytes {
-                if path == old_full {
-                    let _ = fs::write(old_full, bytes);
-                }
+            if let Some((path, bytes)) = &self.main_pre_bytes
+                && path == old_full
+            {
+                let _ = fs::write(old_full, bytes);
             }
         }
         // 2) Restore each staged original (overwrites the in-place rewrite).

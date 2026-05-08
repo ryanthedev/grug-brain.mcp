@@ -23,7 +23,7 @@ pub fn grug_update(
 
     // Path resolution — delete.rs style: strip leading segments, append .md if missing
     let file = if path_name.contains('/') {
-        path_name.split('/').last().unwrap_or(path_name)
+        path_name.split('/').next_back().unwrap_or(path_name)
     } else {
         path_name
     };

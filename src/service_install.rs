@@ -199,10 +199,11 @@ fn install_macos(
         eprintln!("  logs:  ~/.grug-brain/launchd-stderr.log");
         Ok(())
     } else {
-        Err(format!(
+        Err(
             "grug: service installed but not listed in launchctl.\n\
              Check logs: ~/.grug-brain/launchd-stderr.log"
-        ))
+                .to_string(),
+        )
     }
 }
 
@@ -238,10 +239,11 @@ fn install_linux(
         eprintln!("  logs:    journalctl --user -u grug-brain.service");
         Ok(())
     } else {
-        Err(format!(
+        Err(
             "grug: service installed but not enabled.\n\
              Check: journalctl --user -u grug-brain.service"
-        ))
+                .to_string(),
+        )
     }
 }
 

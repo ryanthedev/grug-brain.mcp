@@ -146,7 +146,7 @@ fn list_category_docs(
         .map(|(path, name, desc)| format!("- [{name}]({path}): {desc}"))
         .collect();
 
-    let total_pages = (total as usize + BROWSE_PAGE_SIZE - 1) / BROWSE_PAGE_SIZE;
+    let total_pages = (total as usize).div_ceil(BROWSE_PAGE_SIZE);
     let paging = if total_pages > 1 {
         format!(
             "\n--- page {p}/{total_pages} ({total} docs) | page:{} for more ---",

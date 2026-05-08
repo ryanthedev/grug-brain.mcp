@@ -139,10 +139,10 @@ pub async fn memory_delete(
     )
     .await?;
 
-    if let Some(err) = v.get("error").and_then(|e| e.as_str()) {
-        if err == "read-only brain" {
-            return Ok((StatusCode::FORBIDDEN, Json(v)).into_response());
-        }
+    if let Some(err) = v.get("error").and_then(|e| e.as_str())
+        && err == "read-only brain"
+    {
+        return Ok((StatusCode::FORBIDDEN, Json(v)).into_response());
     }
 
     // Idempotent: return 204 whether the file existed or not.

@@ -35,12 +35,12 @@ pub fn extract_frontmatter(content: &str) -> HashMap<String, String> {
     let fm_block = &after_open[..close_pos];
 
     for line in fm_block.split('\n') {
-        if let Some(idx) = line.find(':') {
-            if idx > 0 {
-                let key = line[..idx].trim().to_string();
-                let value = line[idx + 1..].trim().to_string();
-                result.insert(key, value);
-            }
+        if let Some(idx) = line.find(':')
+            && idx > 0
+        {
+            let key = line[..idx].trim().to_string();
+            let value = line[idx + 1..].trim().to_string();
+            result.insert(key, value);
         }
     }
 
@@ -50,12 +50,12 @@ pub fn extract_frontmatter(content: &str) -> HashMap<String, String> {
 /// Extract the body of a markdown file (everything after frontmatter).
 /// Matches JS: content.replace(/^---[\s\S]*?---\n*/, "").trim()
 pub fn extract_body(content: &str) -> String {
-    if content.starts_with("---") {
-        // Find closing "\n---" after position 3
-        if let Some(pos) = content[3..].find("\n---") {
-            let after_close = pos + 3 + 4; // skip past "\n---"
-            if after_close <= content.len() {
-                return content[after_close..]
+    if let Some(stripped) = content.strip_prefix("---") {
+        // Find closing "\n---" after the opening "---"
+        if let Some(pos) = stripped.find("\n---") {
+            let after_close = pos + 4; // skip past "\n---" (4 chars)
+            if after_close <= stripped.len() {
+                return stripped[after_close..]
                     .trim_start_matches('\n')
                     .trim()
                     .to_string();

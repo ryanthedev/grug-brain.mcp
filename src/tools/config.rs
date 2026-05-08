@@ -4,6 +4,7 @@ use crate::tools::indexing::{remove_file, sync_brain};
 use std::fs;
 
 /// Manage brain configuration. list/add/remove actions.
+#[allow(clippy::too_many_arguments)]
 pub fn grug_config(
     db: &mut GrugDb,
     action: &str,
@@ -67,10 +68,10 @@ fn config_list(db: &GrugDb) -> Result<String, String> {
         if let Some(ref g) = b.git {
             flags.push(format!("git:{g}"));
         }
-        if !b.writable {
-            if let (Some(_source), Some(ri)) = (&b.source, b.refresh_interval) {
-                flags.push(format!("refresh:{ri}s"));
-            }
+        if !b.writable
+            && let (Some(_source), Some(ri)) = (&b.source, b.refresh_interval)
+        {
+            flags.push(format!("refresh:{ri}s"));
         }
         // sync-active/refresh-active flags skipped (Phase 4 concept)
 
@@ -80,6 +81,7 @@ fn config_list(db: &GrugDb) -> Result<String, String> {
     Ok(format!("{} brains\n\n{}", brains.len(), lines.join("\n")))
 }
 
+#[allow(clippy::too_many_arguments)]
 fn config_add(
     db: &mut GrugDb,
     name: Option<&str>,
@@ -261,10 +263,10 @@ fn write_brains_json(
     config_path: &std::path::Path,
     value: &serde_json::Value,
 ) -> Result<(), String> {
-    if let Some(parent) = config_path.parent() {
-        if !parent.exists() {
-            fs::create_dir_all(parent).ok();
-        }
+    if let Some(parent) = config_path.parent()
+        && !parent.exists()
+    {
+        fs::create_dir_all(parent).ok();
     }
     let json = serde_json::to_string_pretty(value).map_err(|e| format!("serialize: {e}"))?;
     fs::write(config_path, format!("{json}\n"))

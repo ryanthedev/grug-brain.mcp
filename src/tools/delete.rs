@@ -30,7 +30,7 @@ pub fn grug_delete(
     validate_memory_path(path_name)?;
 
     let file = if path_name.contains('/') {
-        path_name.split('/').last().unwrap_or(path_name)
+        path_name.split('/').next_back().unwrap_or(path_name)
     } else {
         path_name
     };

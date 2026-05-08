@@ -92,7 +92,7 @@ impl WritePort for GrugDb {
 
         if !brain.writable {
             let v = json!({"error": "read-only brain", "brain": brain.name});
-            return Ok(serde_json::to_string(&v).map_err(|e| e.to_string())?);
+            return serde_json::to_string(&v).map_err(|e| e.to_string());
         }
 
         let (category, stem) = split_rel_path(rel_path)?;
@@ -114,7 +114,7 @@ impl WritePort for GrugDb {
 
         if !file_path.exists() {
             let v = json!({"error": "not found", "path": canonical_rel});
-            return Ok(serde_json::to_string(&v).map_err(|e| e.to_string())?);
+            return serde_json::to_string(&v).map_err(|e| e.to_string());
         }
 
         let result = crate::tools::write::grug_write(
@@ -150,7 +150,7 @@ impl WritePort for GrugDb {
             Ok(_) => {
                 let new_mtime = read_mtime(self, &brain.name, &canonical_rel);
                 let v = json!({"ok": true, "etag": new_mtime});
-                Ok(serde_json::to_string(&v).map_err(|e| e.to_string())?)
+                serde_json::to_string(&v).map_err(|e| e.to_string())
             }
         }
     }
@@ -167,7 +167,7 @@ impl WritePort for GrugDb {
 
         if !brain.writable {
             let v = json!({"error": "read-only brain", "brain": brain.name});
-            return Ok(serde_json::to_string(&v).map_err(|e| e.to_string())?);
+            return serde_json::to_string(&v).map_err(|e| e.to_string());
         }
 
         let (category, stem) = split_rel_path(rel_path)?;
@@ -178,7 +178,7 @@ impl WritePort for GrugDb {
         let file_path = brain.dir.join(&category).join(format!("{stem}.md"));
         if file_path.exists() {
             let v = json!({"error": "duplicate path", "path": canonical_rel});
-            return Ok(serde_json::to_string(&v).map_err(|e| e.to_string())?);
+            return serde_json::to_string(&v).map_err(|e| e.to_string());
         }
 
         let file_content = if let Some(fm) = frontmatter {
@@ -202,7 +202,7 @@ impl WritePort for GrugDb {
 
         let new_mtime = read_mtime(self, &brain.name, &canonical_rel);
         let v = json!({"path": canonical_rel, "etag": new_mtime});
-        Ok(serde_json::to_string(&v).map_err(|e| e.to_string())?)
+        serde_json::to_string(&v).map_err(|e| e.to_string())
     }
 
     fn memory_delete_json(
@@ -215,7 +215,7 @@ impl WritePort for GrugDb {
 
         if !brain.writable {
             let v = json!({"error": "read-only brain", "brain": brain.name});
-            return Ok(serde_json::to_string(&v).map_err(|e| e.to_string())?);
+            return serde_json::to_string(&v).map_err(|e| e.to_string());
         }
 
         let (category, stem) = split_rel_path(rel_path)?;
@@ -238,7 +238,7 @@ impl WritePort for GrugDb {
 
         if !brain.writable {
             let v = json!({"error": "read-only brain", "brain": brain.name});
-            return Ok(serde_json::to_string(&v).map_err(|e| e.to_string())?);
+            return serde_json::to_string(&v).map_err(|e| e.to_string());
         }
 
         let (old_cat, old_stem) = split_rel_path(old_rel_path)?;
@@ -270,7 +270,7 @@ impl WritePort for GrugDb {
                     ("error", e.clone())
                 };
                 let v = json!({"error": err_kind, "message": msg});
-                Ok(serde_json::to_string(&v).map_err(|e| e.to_string())?)
+                serde_json::to_string(&v).map_err(|e| e.to_string())
             }
             Ok((new_canonical, affected)) => {
                 let new_mtime = read_mtime(self, &brain.name, &new_canonical);
@@ -279,7 +279,7 @@ impl WritePort for GrugDb {
                     "etag": new_mtime,
                     "affected_paths": affected,
                 });
-                Ok(serde_json::to_string(&v).map_err(|e| e.to_string())?)
+                serde_json::to_string(&v).map_err(|e| e.to_string())
             }
         }
     }
