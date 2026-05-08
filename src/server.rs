@@ -1,7 +1,12 @@
 use crate::config::{expand_home, load_brains};
+use crate::domain::ports::{
+    BrainPort, ConfigPort, DocsPort, DreamPort, GraphPort, MemoryPort, RecallPort, SearchPort,
+    SyncPort, WritePort,
+};
 use crate::git::{build_sync_locks, git_commit_file};
 use crate::protocol::{SocketRequest, SocketResponse};
 use crate::services::BrainServices;
+use crate::tools::update::EditEntry;
 use crate::tools::{GitCommitRequest, GrugDb};
 use crate::types::BrainConfig;
 use serde_json::Value;
@@ -114,7 +119,7 @@ fn dispatch_tool(db: &mut GrugDb, tool: &str, params: &Value) -> Result<String, 
         "grug-search" => {
             let query = extract_str(params, "query").unwrap_or("");
             let page = extract_u64(params, "page").map(|p| p as usize);
-            Ok(crate::tools::search::grug_search(db, query, page))
+            db.grug_search(query, page)
         }
         "grug-write" => {
             let category = extract_str(params, "category").ok_or("missing field: category")?;
@@ -122,25 +127,25 @@ fn dispatch_tool(db: &mut GrugDb, tool: &str, params: &Value) -> Result<String, 
             let content = extract_str(params, "content").ok_or("missing field: content")?;
             let brain = extract_str(params, "brain");
             let if_match_mtime = params.get("if_match_mtime").and_then(|v| v.as_f64());
-            crate::tools::write::grug_write(db, category, path, content, brain, if_match_mtime)
+            db.grug_write(category, path, content, brain, if_match_mtime)
         }
         "grug-read" => {
             let brain = extract_str(params, "brain");
             let category = extract_str(params, "category");
             let path = extract_str(params, "path");
-            crate::tools::read::grug_read(db, brain, category, path)
+            db.grug_read(brain, category, path)
         }
         "grug-recall" => {
             let category = extract_str(params, "category");
             let brain = extract_str(params, "brain");
-            crate::tools::recall::grug_recall(db, category, brain)
+            db.grug_recall(category, brain)
         }
         "grug-delete" => {
             let category = extract_str(params, "category").ok_or("missing field: category")?;
             let path = extract_str(params, "path").ok_or("missing field: path")?;
             let brain = extract_str(params, "brain");
             let hard = extract_bool(params, "hard").unwrap_or(false);
-            crate::tools::delete::grug_delete(db, category, path, brain, hard)
+            db.grug_delete(category, path, brain, hard)
         }
         "grug-config" => {
             let action = extract_str(params, "action").ok_or("missing field: action")?;
@@ -153,8 +158,7 @@ fn dispatch_tool(db: &mut GrugDb, tool: &str, params: &Value) -> Result<String, 
             let sync_interval = extract_u64(params, "sync_interval");
             let source = extract_str(params, "source");
             let refresh_interval = extract_u64(params, "refresh_interval");
-            crate::tools::config::grug_config(
-                db,
+            db.grug_config(
                 action,
                 name,
                 dir,
@@ -169,75 +173,75 @@ fn dispatch_tool(db: &mut GrugDb, tool: &str, params: &Value) -> Result<String, 
         }
         "grug-sync" => {
             let brain = extract_str(params, "brain");
-            crate::tools::sync::grug_sync(db, brain)
+            db.grug_sync(brain)
         }
-        "grug-dream" => crate::tools::dream::grug_dream(db),
+        "grug-dream" => db.grug_dream(),
         "grug-update" => {
             let category = extract_str(params, "category").ok_or("missing field: category")?;
             let path = extract_str(params, "path").ok_or("missing field: path")?;
             let brain = extract_str(params, "brain");
-            let edits: Vec<crate::tools::update::EditEntry> = serde_json::from_value(
+            let edits: Vec<EditEntry> = serde_json::from_value(
                 params
                     .get("edits")
                     .cloned()
                     .ok_or("missing field: edits")?,
             )
             .map_err(|e| format!("invalid edits: {e}"))?;
-            crate::tools::update::grug_update(db, category, path, &edits, brain)
+            db.grug_update(category, path, &edits, brain)
         }
         "grug-docs" => {
             let category = extract_str(params, "category");
             let path = extract_str(params, "path");
             let page = extract_u64(params, "page").map(|p| p as usize);
-            crate::tools::docs::grug_docs(db, category, path, page)
+            db.grug_docs(category, path, page)
         }
         // HTTP read-only endpoints. These return JSON strings rather than the
         // formatted text shown to MCP clients, but they share the same
         // single-writer worker thread (preserving the dispatch_tool invariant).
-        // See `crate::http::handlers` for the matching axum routes.
-        "__http/brains" => crate::http::handlers::brains_json(db),
+        // See `crate::http` for the matching axum routes.
+        "__http/brains" => db.brains_json(),
         "__http/memories" => {
             let brain = extract_str(params, "brain");
-            crate::http::handlers::memories_json(db, brain)
+            db.memories_json(brain)
         }
         "__http/memory" => {
             let brain = extract_str(params, "brain").ok_or("missing field: brain")?;
             let category = extract_str(params, "category").ok_or("missing field: category")?;
             let path = extract_str(params, "path").ok_or("missing field: path")?;
-            crate::http::handlers::memory_json(db, brain, category, path)
+            db.memory_json(brain, category, path)
         }
         "__http/graph" => {
             let brain = extract_str(params, "brain");
             let mode = extract_str(params, "mode");
             let node = extract_str(params, "node");
             let depth = extract_u64(params, "depth").map(|d| d as usize);
-            crate::http::handlers::graph_json(db, brain, mode, node, depth)
+            db.graph_json(brain, mode, node, depth)
         }
         "__http/search" => {
             let q = extract_str(params, "q").unwrap_or("");
             let brain = extract_str(params, "brain");
-            crate::http::handlers::search_json(db, q, brain)
+            db.search_json(q, brain)
         }
         "__http/quickswitch" => {
             let q = extract_str(params, "q").unwrap_or("");
-            crate::http::handlers::quickswitch_json(db, q)
+            db.quickswitch_json(q)
         }
-        "__http/healthz" => crate::http::handlers::healthz_json(db),
+        "__http/healthz" => db.healthz_json(),
         // Phase 6 read-only endpoints.
         "__http/tags" => {
             let brain = extract_str(params, "brain");
-            crate::http::handlers::tags_json(db, brain)
+            db.tags_json(brain)
         }
         "__http/backlinks" => {
             let brain = extract_str(params, "brain");
             let path = extract_str(params, "path").ok_or("missing field: path")?;
-            crate::http::handlers::backlinks_json(db, brain, path)
+            db.backlinks_json(brain, path)
         }
         "__http/graph_local" => {
             let brain = extract_str(params, "brain");
             let path = extract_str(params, "path").ok_or("missing field: path")?;
             let hops = extract_u64(params, "hops").unwrap_or(2);
-            crate::http::handlers::graph_local_json(db, brain, path, hops)
+            db.graph_local_json(brain, path, hops)
         }
         // Write-path routes (Plan 2 Phase 1).
         "__http/memory_write" => {
@@ -250,27 +254,19 @@ fn dispatch_tool(db: &mut GrugDb, tool: &str, params: &Value) -> Result<String, 
                 .and_then(|v| v.as_f64())
                 .ok_or("missing field: if_match_etag")?;
             let attempted_body = extract_str(params, "attempted_body").unwrap_or(body);
-            crate::http::handlers::memory_write_json(
-                db,
-                brain,
-                rel_path,
-                body,
-                frontmatter,
-                if_match_etag,
-                attempted_body,
-            )
+            db.memory_write_json(brain, rel_path, body, frontmatter, if_match_etag, attempted_body)
         }
         "__http/memory_create" => {
             let brain = extract_str(params, "brain");
             let rel_path = extract_str(params, "rel_path").ok_or("missing field: rel_path")?;
             let body = extract_str(params, "body").unwrap_or("");
             let frontmatter = extract_str(params, "frontmatter");
-            crate::http::handlers::memory_create_json(db, brain, rel_path, body, frontmatter)
+            db.memory_create_json(brain, rel_path, body, frontmatter)
         }
         "__http/memory_delete" => {
             let brain = extract_str(params, "brain").ok_or("missing field: brain")?;
             let rel_path = extract_str(params, "rel_path").ok_or("missing field: rel_path")?;
-            crate::http::handlers::memory_delete_json(db, brain, rel_path)
+            db.memory_delete_json(brain, rel_path)
         }
         "__http/memory_rename" => {
             let brain = extract_str(params, "brain").ok_or("missing field: brain")?;
@@ -280,7 +276,7 @@ fn dispatch_tool(db: &mut GrugDb, tool: &str, params: &Value) -> Result<String, 
                 .get("rewrite_links")
                 .and_then(|v| v.as_bool())
                 .unwrap_or(true);
-            crate::http::handlers::memory_rename_json(db, brain, old_rel, new_rel, rewrite_links)
+            db.memory_rename_json(brain, old_rel, new_rel, rewrite_links)
         }
         _ => Err(format!("unknown tool: {tool}")),
     }
@@ -713,5 +709,77 @@ mod tests {
         // Should succeed when socket doesn't exist
         let result = cleanup_stale_socket(Path::new("/tmp/nonexistent-grug-test.sock"));
         assert!(result.is_ok());
+    }
+
+    // -----------------------------------------------------------------------
+    // DW-3 structural verification tests
+    // -----------------------------------------------------------------------
+
+    /// DW-3.2: No `__http/*` arm in `dispatch_tool` calls `handlers::*_json`.
+    /// We verify by reading this file's source at compile time and asserting
+    /// the banned call pattern is absent from non-test, non-comment code.
+    #[test]
+    #[allow(non_snake_case)]
+    fn test_DW_3_2_no_handlers_json_calls_in_server_rs() {
+        const SERVER_SRC: &str = include_str!("server.rs");
+        // Banned pattern: any non-test, non-comment line containing the old call.
+        // We stop scanning at the test module boundary.
+        let banned = "crate::http::handlers::";
+        let mut in_test_mod = false;
+        let mut violations: Vec<usize> = Vec::new();
+        for (i, line) in SERVER_SRC.lines().enumerate() {
+            let trimmed = line.trim_start();
+            if trimmed.starts_with("mod tests") || trimmed.starts_with("#[cfg(test)]") {
+                in_test_mod = true;
+            }
+            if in_test_mod {
+                continue;
+            }
+            if trimmed.starts_with("//") {
+                continue;
+            }
+            if line.contains(banned) {
+                violations.push(i + 1);
+            }
+        }
+        assert!(
+            violations.is_empty(),
+            "DW-3.2: dispatch_tool still calls http::handlers at lines: {:?}",
+            violations
+        );
+    }
+
+    /// DW-3.2: Every `__http/*` arm in dispatch_tool calls `db.` (trait method).
+    #[test]
+    #[allow(non_snake_case)]
+    fn test_DW_3_2_all_http_arms_use_db_method() {
+        const SERVER_SRC: &str = include_str!("server.rs");
+        let http_arms: &[&str] = &[
+            "\"__http/brains\"",
+            "\"__http/memories\"",
+            "\"__http/memory\"",
+            "\"__http/graph\"",
+            "\"__http/search\"",
+            "\"__http/quickswitch\"",
+            "\"__http/healthz\"",
+            "\"__http/tags\"",
+            "\"__http/backlinks\"",
+            "\"__http/graph_local\"",
+            "\"__http/memory_write\"",
+            "\"__http/memory_create\"",
+            "\"__http/memory_delete\"",
+            "\"__http/memory_rename\"",
+        ];
+        let mut missing = Vec::new();
+        for arm in http_arms {
+            if !SERVER_SRC.contains(arm) {
+                missing.push(*arm);
+            }
+        }
+        assert!(
+            missing.is_empty(),
+            "DW-3.2: these __http/* dispatch arms are missing from server.rs: {:?}",
+            missing
+        );
     }
 }

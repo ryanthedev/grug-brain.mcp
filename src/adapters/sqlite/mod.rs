@@ -1,11 +1,10 @@
 //! SQLite adapter — implements every domain port (`crate::domain::ports`)
 //! on the existing `GrugDb`. Each submodule hosts one `impl PortName for
-//! GrugDb` block; all bodies thinly delegate to the legacy data-access
-//! functions in `crate::tools::*` and `crate::http::handlers`.
+//! GrugDb` block. HTTP-shaped methods contain data-access logic directly;
+//! MCP-shaped methods delegate to `crate::tools::*` utilities.
 //!
-//! Phase 2 is purely additive — no existing call site is changed. Phase 3
-//! (HTTP) and Phase 4 (MCP) migrate `dispatch_tool` to call through the
-//! traits and remove the now-redundant standalone functions.
+//! Phase 3 migrated all HTTP `dispatch_tool` arms to call through these traits
+//! and consolidated the `*_json` data-access function bodies into these impls.
 
 pub mod brains;
 pub mod config;
