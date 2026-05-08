@@ -1,6 +1,7 @@
 pub mod client;
 pub mod config;
 pub mod db;
+pub mod domain;
 pub mod git;
 pub mod helpers;
 pub mod http;
