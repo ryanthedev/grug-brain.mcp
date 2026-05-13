@@ -3,7 +3,7 @@ use crate::domain::ports::{
     BrainPort, ConfigPort, DocsPort, DreamPort, GraphPort, MemoryPort, RecallPort, SearchPort,
     SyncPort, WritePort,
 };
-use crate::git::{build_sync_locks, git_commit_file};
+use crate::git::{build_sync_locks, git, git_commit_file, has_remote};
 use crate::protocol::{SocketRequest, SocketResponse};
 use crate::services::BrainServices;
 use crate::tools::update::EditEntry;
@@ -452,19 +452,36 @@ pub async fn run_server_with_shutdown(
     // Start DB worker thread
     let db_tx = spawn_db_thread(&db, brain_config.clone(), Some(git_commit_tx))?;
 
-    // Spawn async git-commit consumer. Holds its own copy of the brain list
-    // and the per-brain SyncLocks so it can call `git_commit_file` for the
-    // right brain on each request.
+    // Spawn async git-commit consumer. Drains all pending requests as a
+    // batch, commits each file, then pushes once per brain that had commits.
     let commit_brains = brain_config.brains.clone();
     let commit_locks = build_sync_locks(&commit_brains);
     tokio::spawn(async move {
         while let Some(req) = git_commit_rx.recv().await {
-            let brain = commit_brains.iter().find(|b| b.name == req.brain).cloned();
-            let Some(brain) = brain else {
-                eprintln!("grug: commit request for unknown brain {}", req.brain);
-                continue;
-            };
-            git_commit_file(&brain, &req.rel_path, &req.action, &commit_locks).await;
+            let mut batch = vec![req];
+            while let Ok(more) = git_commit_rx.try_recv() {
+                batch.push(more);
+            }
+
+            let mut pushed_brains = std::collections::HashSet::new();
+            for req in &batch {
+                let brain = commit_brains.iter().find(|b| b.name == req.brain).cloned();
+                let Some(brain) = brain else {
+                    eprintln!("grug: commit request for unknown brain {}", req.brain);
+                    continue;
+                };
+                git_commit_file(&brain, &req.rel_path, &req.action, &commit_locks).await;
+                pushed_brains.insert(brain.name.clone());
+            }
+
+            for brain_name in &pushed_brains {
+                let Some(brain) = commit_brains.iter().find(|b| b.name == *brain_name) else {
+                    continue;
+                };
+                if has_remote(brain).await {
+                    git(&brain.dir, &["push", "--quiet"]).await;
+                }
+            }
         }
     });
 
