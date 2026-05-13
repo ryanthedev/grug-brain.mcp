@@ -14,14 +14,15 @@ pub fn grug_conversation(
     message: Option<&str>,
     identity: Option<&str>,
     status: Option<&str>,
+    brain_name: Option<&str>,
 ) -> Result<String, String> {
     db.maybe_reload_config();
     match action {
-        "open" | "start" | "new" | "begin" | "create" => open(db, title, message, identity),
-        "reply" | "post" | "message" | "add" | "respond" => reply(db, title, message, identity),
-        "list" | "ls" => list(db),
-        "close" | "resolve" | "done" => close(db, title),
-        "status" => set_status(db, title, status),
+        "open" | "start" | "new" | "begin" | "create" => open(db, title, message, identity, brain_name),
+        "reply" | "post" | "message" | "add" | "respond" => reply(db, title, message, identity, brain_name),
+        "list" | "ls" => list(db, brain_name),
+        "close" | "resolve" | "done" => close(db, title, brain_name),
+        "status" => set_status(db, title, status, brain_name),
         _ => Ok(format!(
             "unknown action: {action}\n\n\
              ## grug-conversation usage\n\n\
@@ -32,9 +33,23 @@ pub fn grug_conversation(
              | list | (none) | show all threads |\n\
              | close | title | mark thread resolved |\n\
              | status | title, status | set custom status |\n\n\
-             `identity` is optional (defaults to hostname)."
+             `identity` is optional (defaults to hostname).\n\
+             `brain` is optional (defaults to first writable brain with a git remote)."
         )),
     }
+}
+
+/// Resolve the brain for conversations: prefer a writable brain with a git
+/// remote so conversations sync across machines. Falls back to primary.
+fn resolve_conversation_brain<'a>(db: &'a GrugDb, name: Option<&str>) -> Result<&'a crate::types::Brain, String> {
+    if let Some(n) = name {
+        return db.resolve_brain(Some(n));
+    }
+    let config = db.config();
+    config.brains.iter()
+        .find(|b| b.writable && b.git.is_some())
+        .ok_or_else(|| "no writable brain with a git remote configured".to_string())
+        .or_else(|_| db.resolve_brain(None))
 }
 
 fn resolve_identity(identity: Option<&str>) -> String {
@@ -46,12 +61,13 @@ fn open(
     title: Option<&str>,
     message: Option<&str>,
     identity: Option<&str>,
+    brain_name: Option<&str>,
 ) -> Result<String, String> {
     let title = title.ok_or("missing field: title")?;
     let message = message.ok_or("missing field: message")?;
     validate_memory_path(title)?;
 
-    let brain = db.resolve_brain(None)?.clone();
+    let brain = resolve_conversation_brain(db, brain_name)?.clone();
     if !brain.writable {
         return Ok(format!("brain \"{}\" is read-only", brain.name));
     }
@@ -92,11 +108,12 @@ fn reply(
     title: Option<&str>,
     message: Option<&str>,
     identity: Option<&str>,
+    brain_name: Option<&str>,
 ) -> Result<String, String> {
     let title = title.ok_or("missing field: title")?;
     let message = message.ok_or("missing field: message")?;
 
-    let brain = db.resolve_brain(None)?.clone();
+    let brain = resolve_conversation_brain(db, brain_name)?.clone();
     if !brain.writable {
         return Ok(format!("brain \"{}\" is read-only", brain.name));
     }
@@ -158,8 +175,8 @@ fn add_participant(content: &str, who: &str) -> String {
     content.to_string()
 }
 
-fn list(db: &mut GrugDb) -> Result<String, String> {
-    let brain = db.resolve_brain(None)?.clone();
+fn list(db: &mut GrugDb, brain_name: Option<&str>) -> Result<String, String> {
+    let brain = resolve_conversation_brain(db, brain_name)?.clone();
     let conv_dir = brain.dir.join(CATEGORY);
 
     if !conv_dir.exists() {
@@ -195,19 +212,20 @@ fn list(db: &mut GrugDb) -> Result<String, String> {
     Ok(out)
 }
 
-fn close(db: &mut GrugDb, title: Option<&str>) -> Result<String, String> {
-    set_status(db, title, Some("resolved"))
+fn close(db: &mut GrugDb, title: Option<&str>, brain_name: Option<&str>) -> Result<String, String> {
+    set_status(db, title, Some("resolved"), brain_name)
 }
 
 fn set_status(
     db: &mut GrugDb,
     title: Option<&str>,
     status: Option<&str>,
+    brain_name: Option<&str>,
 ) -> Result<String, String> {
     let title = title.ok_or("missing field: title")?;
     let status = status.ok_or("missing field: status")?;
 
-    let brain = db.resolve_brain(None)?.clone();
+    let brain = resolve_conversation_brain(db, brain_name)?.clone();
     if !brain.writable {
         return Ok(format!("brain \"{}\" is read-only", brain.name));
     }
@@ -263,7 +281,7 @@ mod tests {
         let result = grug_conversation(
             &mut db, "open",
             Some("test thread"), Some("hello world"),
-            Some("mac-studio"), None,
+            Some("mac-studio"), None, None,
         );
         assert!(result.is_ok());
         assert!(result.unwrap().contains("opened conversation: test-thread"));
@@ -272,8 +290,8 @@ mod tests {
     #[test]
     fn test_open_duplicate_errors() {
         let (mut db, _tmp, _rx) = test_db_with_git();
-        grug_conversation(&mut db, "open", Some("dupe"), Some("msg"), Some("a"), None).unwrap();
-        let result = grug_conversation(&mut db, "open", Some("dupe"), Some("msg2"), Some("b"), None);
+        grug_conversation(&mut db, "open", Some("dupe"), Some("msg"), Some("a"), None, None).unwrap();
+        let result = grug_conversation(&mut db, "open", Some("dupe"), Some("msg2"), Some("b"), None, None);
         assert!(result.is_err());
         assert!(result.unwrap_err().contains("already exists"));
     }
@@ -281,9 +299,9 @@ mod tests {
     #[test]
     fn test_reply_appends_message() {
         let (mut db, tmp, _rx) = test_db_with_git();
-        grug_conversation(&mut db, "open", Some("chat"), Some("first"), Some("alice"), None).unwrap();
+        grug_conversation(&mut db, "open", Some("chat"), Some("first"), Some("alice"), None, None).unwrap();
         let result = grug_conversation(
-            &mut db, "reply", Some("chat"), Some("second"), Some("bob"), None,
+            &mut db, "reply", Some("chat"), Some("second"), Some("bob"), None, None,
         );
         assert!(result.is_ok());
         assert!(result.unwrap().contains("message 2"));
@@ -298,7 +316,7 @@ mod tests {
     #[test]
     fn test_reply_not_found() {
         let (mut db, _tmp, _rx) = test_db_with_git();
-        let result = grug_conversation(&mut db, "reply", Some("nope"), Some("msg"), Some("a"), None);
+        let result = grug_conversation(&mut db, "reply", Some("nope"), Some("msg"), Some("a"), None, None);
         assert!(result.is_err());
         assert!(result.unwrap_err().contains("not found"));
     }
@@ -306,9 +324,9 @@ mod tests {
     #[test]
     fn test_list_conversations() {
         let (mut db, _tmp, _rx) = test_db_with_git();
-        grug_conversation(&mut db, "open", Some("alpha"), Some("msg"), Some("a"), None).unwrap();
-        grug_conversation(&mut db, "open", Some("beta"), Some("msg"), Some("b"), None).unwrap();
-        let result = grug_conversation(&mut db, "list", None, None, None, None).unwrap();
+        grug_conversation(&mut db, "open", Some("alpha"), Some("msg"), Some("a"), None, None).unwrap();
+        grug_conversation(&mut db, "open", Some("beta"), Some("msg"), Some("b"), None, None).unwrap();
+        let result = grug_conversation(&mut db, "list", None, None, None, None, None).unwrap();
         assert!(result.contains("alpha"));
         assert!(result.contains("beta"));
         assert!(result.contains("[open]"));
@@ -317,15 +335,15 @@ mod tests {
     #[test]
     fn test_list_empty() {
         let (mut db, _tmp, _rx) = test_db_with_git();
-        let result = grug_conversation(&mut db, "list", None, None, None, None).unwrap();
+        let result = grug_conversation(&mut db, "list", None, None, None, None, None).unwrap();
         assert!(result.contains("no conversations"));
     }
 
     #[test]
     fn test_close_sets_resolved() {
         let (mut db, tmp, _rx) = test_db_with_git();
-        grug_conversation(&mut db, "open", Some("issue"), Some("bug"), Some("a"), None).unwrap();
-        grug_conversation(&mut db, "close", Some("issue"), None, None, None).unwrap();
+        grug_conversation(&mut db, "open", Some("issue"), Some("bug"), Some("a"), None, None).unwrap();
+        grug_conversation(&mut db, "close", Some("issue"), None, None, None, None).unwrap();
         let path = tmp.path().join("memories/conversations/issue.md");
         let content = fs::read_to_string(path).unwrap();
         assert!(content.contains("status: resolved"));
@@ -334,9 +352,9 @@ mod tests {
     #[test]
     fn test_status_custom() {
         let (mut db, tmp, _rx) = test_db_with_git();
-        grug_conversation(&mut db, "open", Some("thread"), Some("msg"), Some("a"), None).unwrap();
+        grug_conversation(&mut db, "open", Some("thread"), Some("msg"), Some("a"), None, None).unwrap();
         grug_conversation(
-            &mut db, "status", Some("thread"), None, None, Some("awaiting-verification"),
+            &mut db, "status", Some("thread"), None, None, Some("awaiting-verification"), None,
         ).unwrap();
         let path = tmp.path().join("memories/conversations/thread.md");
         let content = fs::read_to_string(path).unwrap();
@@ -346,14 +364,14 @@ mod tests {
     #[test]
     fn test_open_missing_title() {
         let (mut db, _tmp, _rx) = test_db_with_git();
-        let result = grug_conversation(&mut db, "open", None, Some("msg"), None, None);
+        let result = grug_conversation(&mut db, "open", None, Some("msg"), None, None, None);
         assert!(result.is_err());
     }
 
     #[test]
     fn test_open_missing_message() {
         let (mut db, _tmp, _rx) = test_db_with_git();
-        let result = grug_conversation(&mut db, "open", Some("t"), None, None, None);
+        let result = grug_conversation(&mut db, "open", Some("t"), None, None, None, None);
         assert!(result.is_err());
     }
 
@@ -374,7 +392,7 @@ mod tests {
     #[test]
     fn test_emits_git_commit() {
         let (mut db, _tmp, mut rx) = test_db_with_git();
-        grug_conversation(&mut db, "open", Some("git-test"), Some("msg"), Some("a"), None).unwrap();
+        grug_conversation(&mut db, "open", Some("git-test"), Some("msg"), Some("a"), None, None).unwrap();
         let req = rx.try_recv().unwrap();
         assert_eq!(req.rel_path, "conversations/git-test.md");
         assert_eq!(req.action, "write");

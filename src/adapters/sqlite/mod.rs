@@ -118,7 +118,7 @@ mod tests {
         let _ = SyncPort::grug_sync(&mut db, None).expect("SyncPort::grug_sync");
         // DreamPort on an empty brain returns the "nothing to dream about" path.
         let _ = DreamPort::grug_dream(&mut db).expect("DreamPort::grug_dream");
-        let _ = ConversationPort::grug_conversation(&mut db, "list", None, None, None, None)
+        let _ = ConversationPort::grug_conversation(&mut db, "list", None, None, None, None, None)
             .expect("ConversationPort::grug_conversation(list)");
     }
 

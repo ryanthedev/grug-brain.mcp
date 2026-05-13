@@ -620,7 +620,7 @@ dependencies = [
 
 [[package]]
 name = "grug-brain"
-version = "4.4.1"
+version = "4.5.0"
 dependencies = [
  "axum",
  "chrono",

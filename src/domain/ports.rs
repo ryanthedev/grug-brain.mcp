@@ -312,6 +312,7 @@ pub trait ConversationPort {
         message: Option<&str>,
         identity: Option<&str>,
         status: Option<&str>,
+        brain: Option<&str>,
     ) -> Result<String, String>;
 }
 

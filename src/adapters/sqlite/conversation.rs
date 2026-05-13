@@ -10,7 +10,8 @@ impl ConversationPort for GrugDb {
         message: Option<&str>,
         identity: Option<&str>,
         status: Option<&str>,
+        brain: Option<&str>,
     ) -> Result<String, String> {
-        grug_conversation(self, action, title, message, identity, status)
+        grug_conversation(self, action, title, message, identity, status, brain)
     }
 }

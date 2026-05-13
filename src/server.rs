@@ -182,7 +182,8 @@ fn dispatch_tool(db: &mut GrugDb, tool: &str, params: &Value) -> Result<String, 
             let message = extract_str(params, "message");
             let identity = extract_str(params, "identity");
             let status = extract_str(params, "status");
-            db.grug_conversation(action, title, message, identity, status)
+            let brain = extract_str(params, "brain");
+            db.grug_conversation(action, title, message, identity, status, brain)
         }
         "grug-update" => {
             let category = extract_str(params, "category").ok_or("missing field: category")?;

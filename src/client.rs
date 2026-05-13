@@ -146,6 +146,8 @@ pub struct ConversationParams {
     pub identity: Option<String>,
     /// Status value for the status action (e.g. open, awaiting-verification, resolved).
     pub status: Option<String>,
+    /// Brain to use (defaults to first writable brain with a git remote).
+    pub brain: Option<String>,
 }
 
 // ---------------------------------------------------------------------------
