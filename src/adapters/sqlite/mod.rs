@@ -8,6 +8,7 @@
 
 pub mod brains;
 pub mod config;
+pub mod conversation;
 pub mod docs;
 pub mod dream;
 pub mod graph;
@@ -21,8 +22,8 @@ pub mod write;
 #[allow(non_snake_case)]
 mod tests {
     use crate::domain::ports::{
-        BrainPort, ConfigPort, DocsPort, DreamPort, GraphPort, MemoryPort, RecallPort, SearchPort,
-        SyncPort, WritePort,
+        BrainPort, ConfigPort, ConversationPort, DocsPort, DreamPort, GraphPort, MemoryPort,
+        RecallPort, SearchPort, SyncPort, WritePort,
     };
     use crate::tools::test_helpers::test_db;
     use crate::tools::GrugDb;
@@ -42,7 +43,8 @@ mod tests {
                 + DreamPort
                 + SyncPort
                 + DocsPort
-                + ConfigPort,
+                + ConfigPort
+                + ConversationPort,
         {
         }
         requires::<GrugDb>();
@@ -116,6 +118,8 @@ mod tests {
         let _ = SyncPort::grug_sync(&mut db, None).expect("SyncPort::grug_sync");
         // DreamPort on an empty brain returns the "nothing to dream about" path.
         let _ = DreamPort::grug_dream(&mut db).expect("DreamPort::grug_dream");
+        let _ = ConversationPort::grug_conversation(&mut db, "list", None, None, None, None)
+            .expect("ConversationPort::grug_conversation(list)");
     }
 
     #[test]
@@ -126,6 +130,7 @@ mod tests {
         let files: &[(&str, &str)] = &[
             ("brains.rs", include_str!("brains.rs")),
             ("config.rs", include_str!("config.rs")),
+            ("conversation.rs", include_str!("conversation.rs")),
             ("docs.rs", include_str!("docs.rs")),
             ("dream.rs", include_str!("dream.rs")),
             ("graph.rs", include_str!("graph.rs")),
@@ -157,6 +162,7 @@ mod tests {
             ("mod.rs", include_str!("mod.rs")),
             ("brains.rs", include_str!("brains.rs")),
             ("config.rs", include_str!("config.rs")),
+            ("conversation.rs", include_str!("conversation.rs")),
             ("docs.rs", include_str!("docs.rs")),
             ("dream.rs", include_str!("dream.rs")),
             ("graph.rs", include_str!("graph.rs")),

@@ -1,7 +1,7 @@
 use crate::config::{expand_home, load_brains};
 use crate::domain::ports::{
-    BrainPort, ConfigPort, DocsPort, DreamPort, GraphPort, MemoryPort, RecallPort, SearchPort,
-    SyncPort, WritePort,
+    BrainPort, ConfigPort, ConversationPort, DocsPort, DreamPort, GraphPort, MemoryPort,
+    RecallPort, SearchPort, SyncPort, WritePort,
 };
 use crate::git::{build_sync_locks, git, git_commit_file, has_remote};
 use crate::protocol::{SocketRequest, SocketResponse};
@@ -176,6 +176,14 @@ fn dispatch_tool(db: &mut GrugDb, tool: &str, params: &Value) -> Result<String, 
             db.grug_sync(brain)
         }
         "grug-dream" => db.grug_dream(),
+        "grug-conversation" => {
+            let action = extract_str(params, "action").ok_or("missing field: action")?;
+            let title = extract_str(params, "title");
+            let message = extract_str(params, "message");
+            let identity = extract_str(params, "identity");
+            let status = extract_str(params, "status");
+            db.grug_conversation(action, title, message, identity, status)
+        }
         "grug-update" => {
             let category = extract_str(params, "category").ok_or("missing field: category")?;
             let path = extract_str(params, "path").ok_or("missing field: path")?;

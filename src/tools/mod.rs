@@ -1,4 +1,5 @@
 pub mod config;
+pub mod conversation;
 pub mod delete;
 pub mod docs;
 pub mod dream;

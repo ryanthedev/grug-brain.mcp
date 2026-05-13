@@ -134,6 +134,20 @@ pub struct DocsParams {
     pub page: Option<u64>,
 }
 
+#[derive(Debug, Deserialize, Serialize, JsonSchema)]
+pub struct ConversationParams {
+    /// Action: open, reply, list, close, status.
+    pub action: String,
+    /// Conversation title (used as slug). Required for open, reply, close, status.
+    pub title: Option<String>,
+    /// Message content. Required for open and reply.
+    pub message: Option<String>,
+    /// Identity of the poster (defaults to hostname).
+    pub identity: Option<String>,
+    /// Status value for the status action (e.g. open, awaiting-verification, resolved).
+    pub status: Option<String>,
+}
+
 // ---------------------------------------------------------------------------
 // Socket client — persistent connection to the server.
 // ---------------------------------------------------------------------------
@@ -335,6 +349,15 @@ impl GrugMcp {
     )]
     async fn docs(&self, params: Parameters<DocsParams>) -> String {
         self.forward("grug-docs", serde_json::to_value(&params.0).unwrap())
+            .await
+    }
+
+    #[tool(
+        name = "grug-conversation",
+        description = "Threaded conversations between Claude instances across machines. Actions: open (start a thread), reply (post a message), list (show threads), close (mark resolved), status (set custom status). Messages are git-committed and pushed to the remote automatically."
+    )]
+    async fn conversation(&self, params: Parameters<ConversationParams>) -> String {
+        self.forward("grug-conversation", serde_json::to_value(&params.0).unwrap())
             .await
     }
 }

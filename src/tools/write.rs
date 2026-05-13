@@ -102,7 +102,7 @@ pub fn grug_write(
     Ok(format!("{action} {rel_path}"))
 }
 
-fn ensure_dir(path: &Path) {
+pub(crate) fn ensure_dir(path: &Path) {
     if !path.exists() {
         fs::create_dir_all(path).ok();
     }
@@ -111,7 +111,7 @@ fn ensure_dir(path: &Path) {
 /// Atomically write `bytes` to `target` via tempfile-then-rename within the
 /// same directory. The rename is atomic on POSIX; either the old file or the
 /// new file is observable, never a half-written file.
-fn atomic_write(target: &Path, bytes: &[u8]) -> std::io::Result<()> {
+pub(crate) fn atomic_write(target: &Path, bytes: &[u8]) -> std::io::Result<()> {
     let parent = target.parent().ok_or_else(|| {
         std::io::Error::new(std::io::ErrorKind::InvalidInput, "target has no parent")
     })?;

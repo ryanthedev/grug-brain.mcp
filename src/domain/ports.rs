@@ -299,6 +299,22 @@ pub trait ConfigPort {
     ) -> Result<String, String>;
 }
 
+/// Threaded conversations between multiple Claude instances across machines.
+pub trait ConversationPort {
+    /// Open a new thread, reply to an existing one, list threads, close, or
+    /// set status.
+    ///
+    /// Serves: `grug-conversation` (MCP tool).
+    fn grug_conversation(
+        &mut self,
+        action: &str,
+        title: Option<&str>,
+        message: Option<&str>,
+        identity: Option<&str>,
+        status: Option<&str>,
+    ) -> Result<String, String>;
+}
+
 #[cfg(test)]
 #[allow(non_snake_case)]
 mod tests {
@@ -310,7 +326,7 @@ mod tests {
     /// some method's doc comment. Cross-checked against
     /// `server.rs::dispatch_tool` arms.
     const ALL_DISPATCH_ARMS: &[&str] = &[
-        // MCP arms (10)
+        // MCP arms (11)
         "grug-search",
         "grug-write",
         "grug-read",
@@ -321,6 +337,7 @@ mod tests {
         "grug-dream",
         "grug-update",
         "grug-docs",
+        "grug-conversation",
         // HTTP arms (14)
         "__http/brains",
         "__http/memories",
