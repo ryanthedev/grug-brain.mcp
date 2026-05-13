@@ -354,7 +354,7 @@ impl GrugMcp {
 
     #[tool(
         name = "grug-conversation",
-        description = "Threaded conversations between Claude instances across machines. Actions: open (start a thread), reply (post a message), list (show threads), close (mark resolved), status (set custom status). Messages are git-committed and pushed to the remote automatically."
+        description = "Threaded conversations between Claude instances across machines. Params: action (required), title (thread name), message (content), identity (defaults to hostname), status. Actions: open (title + message), reply (title + message), list, close (title), status (title + status). Git-committed and pushed automatically."
     )]
     async fn conversation(&self, params: Parameters<ConversationParams>) -> String {
         self.forward("grug-conversation", serde_json::to_value(&params.0).unwrap())

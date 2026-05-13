@@ -17,12 +17,23 @@ pub fn grug_conversation(
 ) -> Result<String, String> {
     db.maybe_reload_config();
     match action {
-        "open" => open(db, title, message, identity),
-        "reply" => reply(db, title, message, identity),
-        "list" => list(db),
-        "close" => close(db, title),
+        "open" | "start" | "new" | "begin" | "create" => open(db, title, message, identity),
+        "reply" | "post" | "message" | "add" | "respond" => reply(db, title, message, identity),
+        "list" | "ls" => list(db),
+        "close" | "resolve" | "done" => close(db, title),
         "status" => set_status(db, title, status),
-        _ => Err(format!("unknown conversation action: {action}")),
+        _ => Ok(format!(
+            "unknown action: {action}\n\n\
+             ## grug-conversation usage\n\n\
+             | action | required params | description |\n\
+             |--------|----------------|-------------|\n\
+             | open | title, message | start a new thread |\n\
+             | reply | title, message | post to existing thread |\n\
+             | list | (none) | show all threads |\n\
+             | close | title | mark thread resolved |\n\
+             | status | title, status | set custom status |\n\n\
+             `identity` is optional (defaults to hostname)."
+        )),
     }
 }
 
