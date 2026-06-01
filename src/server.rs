@@ -44,6 +44,34 @@ fn pid_path_for_socket(socket_path: &Path) -> PathBuf {
     socket_path.with_extension("pid")
 }
 
+/// Check whether `pid` belongs to a live `grug` process.
+///
+/// `kill -0` only proves *some* process owns the PID — but after a reboot the
+/// PID in our stale pid file may have been recycled to an unrelated process
+/// (e.g. a macOS system agent). Trusting `kill -0` alone makes us refuse to
+/// start forever under launchd `KeepAlive`. Confirm the command name actually
+/// looks like grug before treating it as a running server.
+#[cfg(unix)]
+fn pid_is_grug(pid: u32) -> bool {
+    // `ps -o comm=` prints the executable name/path with no header row.
+    let Ok(out) = std::process::Command::new("ps")
+        .args(["-p", &pid.to_string(), "-o", "comm="])
+        .output()
+    else {
+        return false;
+    };
+    if !out.status.success() {
+        return false;
+    }
+    let comm = String::from_utf8_lossy(&out.stdout);
+    // Match on the basename so a full path like /Users/x/.grug-brain/bin/grug
+    // (which contains "grug" in the directory) doesn't false-positive.
+    comm.trim()
+        .rsplit('/')
+        .next()
+        .is_some_and(|name| name.starts_with("grug"))
+}
+
 /// Remove stale socket file if it exists.
 /// If a live server is already running (PID file with living process), returns error.
 fn cleanup_stale_socket(socket_path: &Path) -> Result<(), String> {
@@ -58,14 +86,15 @@ fn cleanup_stale_socket(socket_path: &Path) -> Result<(), String> {
             .trim()
             .parse::<u32>()
         {
-            // Check if process is alive via kill(pid, 0)
+            // Check if process is alive via kill(pid, 0), and confirm it is
+            // actually grug — not an unrelated process that recycled the PID.
             #[cfg(unix)]
             {
                 let alive = std::process::Command::new("kill")
                     .args(["-0", &pid.to_string()])
                     .status()
                     .is_ok_and(|s| s.success());
-                if alive {
+                if alive && pid_is_grug(pid) {
                     return Err(format!(
                         "grug: another server is running (pid {pid}). \
                          Stop it first or remove {}",
@@ -74,7 +103,8 @@ fn cleanup_stale_socket(socket_path: &Path) -> Result<(), String> {
                 }
             }
         }
-        // PID file exists but process is dead — clean up both
+        // PID file is stale (process dead, or PID recycled by a non-grug
+        // process) — clean up both.
         let _ = fs::remove_file(&pid_path);
     }
 
@@ -735,6 +765,45 @@ mod tests {
         // Should succeed when socket doesn't exist
         let result = cleanup_stale_socket(Path::new("/tmp/nonexistent-grug-test.sock"));
         assert!(result.is_ok());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_pid_is_grug_rejects_non_grug_process() {
+        // PID 1 (init/launchd) is always alive but is never grug. This is the
+        // regression: kill -0 would call it alive, but it must not be treated
+        // as a running grug server.
+        assert!(!pid_is_grug(1));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_pid_is_grug_accepts_self() {
+        // The unit-test harness binary is named `grug_brain-<hash>` (the lib
+        // crate), which starts with "grug", so the running test process is
+        // recognised — guarding against an over-aggressive false return.
+        assert!(pid_is_grug(std::process::id()));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_cleanup_stale_socket_recycled_pid() {
+        // A pid file pointing at a live-but-non-grug process (PID 1) must be
+        // treated as stale: the socket and pid file are removed and start-up
+        // is allowed to proceed, rather than erroring "another server".
+        let dir = std::env::temp_dir().join(format!("grug-recycled-{}", std::process::id()));
+        let _ = fs::create_dir_all(&dir);
+        let sock = dir.join("grug.sock");
+        let pid = dir.join("grug.pid");
+        fs::write(&sock, b"").unwrap();
+        fs::write(&pid, "1").unwrap();
+
+        let result = cleanup_stale_socket(&sock);
+
+        assert!(result.is_ok(), "recycled PID should be stale: {result:?}");
+        assert!(!sock.exists(), "stale socket should be removed");
+        assert!(!pid.exists(), "stale pid file should be removed");
+        let _ = fs::remove_dir_all(&dir);
     }
 
     // -----------------------------------------------------------------------
