@@ -1,0 +1,282 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <meta name="description" content="grug-brain is local-first memory for agents: brains as stores, git as history, and organization primitives that keep context durable.">
+  <title>grug-brain | Persistent memory for agents</title>
+  <base href="/grug-brain/">
+  <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+  <div class="page-shell">
+    <header class="site-header">
+      <a class="brand" href="#top" aria-label="grug-brain home">
+        <span class="brand-mark" aria-hidden="true">
+          <svg viewBox="0 0 80 80" role="presentation">
+            <path d="M40 12c-14.7 0-26 10.8-26 24.7 0 7 2.8 13.2 7.6 17.8 4.1 4 9.7 6.6 15.6 6.6 2.5 0 4.4 1.9 4.4 4.5v2.4h4.8v-2.4c0-2.6 1.9-4.5 4.4-4.5 13.1 0 23-10.5 23-24.3C73.8 22.9 59.2 12 40 12Z"/>
+            <path d="M29 25.5c-1.9 0-3.5 1.6-3.5 3.5s1.6 3.5 3.5 3.5 3.5-1.6 3.5-3.5-1.6-3.5-3.5-3.5Zm20.8 0c-1.9 0-3.5 1.6-3.5 3.5s1.6 3.5 3.5 3.5 3.5-1.6 3.5-3.5-1.6-3.5-3.5-3.5Zm-10.4 8.6c-1.9 0-3.5 1.6-3.5 3.5s1.6 3.5 3.5 3.5 3.5-1.6 3.5-3.5-1.6-3.5-3.5-3.5Z"/>
+            <path d="M29 29h10.4M39.4 29h10.4M29 29l10.4 8.6m10.4-8.6-10.4 8.6M24 41.5h11.4m9.2 0H56"/>
+          </svg>
+        </span>
+        <span class="brand-text">grug-brain</span>
+      </a>
+      <nav class="site-nav" aria-label="Primary">
+        <a href="#gist">Gist</a>
+        <a href="#stores">Stores</a>
+        <a href="#agent">Agent</a>
+        <a href="#history">History</a>
+      </nav>
+      <a class="nav-cta" href="https://github.com/ryanccn/grug-brain.mcp">Read the repo</a>
+    </header>
+
+    <main id="top">
+      <section class="hero">
+        <aside class="history-rail" aria-label="Scroll progression">
+          <span>01</span>
+          <span>02</span>
+          <span>03</span>
+          <span>04</span>
+        </aside>
+
+        <div class="hero-copy">
+          <p class="eyebrow">LOCAL-FIRST MEMORY FOR AGENTS</p>
+          <h1>grug-brain gives your agent a place to keep context.</h1>
+          <p class="lead">
+            It turns markdown files into durable memory, then layers search, organization,
+            syncing, and history on top so the agent can come back tomorrow and still know what matters.
+          </p>
+          <div class="hero-actions">
+            <a class="button button-primary" href="https://github.com/ryanccn/grug-brain.mcp">Install grug-brain</a>
+            <a class="button button-secondary" href="#gist">Read the gist</a>
+          </div>
+          <dl class="signal-row" aria-label="Core product signals">
+            <div>
+              <dt>Storage</dt>
+              <dd>Markdown brains</dd>
+            </div>
+            <div>
+              <dt>Index</dt>
+              <dd>FTS5 search</dd>
+            </div>
+            <div>
+              <dt>History</dt>
+              <dd>Git-backed sync</dd>
+            </div>
+          </dl>
+        </div>
+
+        <div class="hero-visual" aria-hidden="true">
+          <div class="halo-layer" data-depth="0.08"></div>
+          <div class="brain-cloud" data-depth="0.16">
+            <span class="cloud cloud-a"></span>
+            <span class="cloud cloud-b"></span>
+            <span class="cloud cloud-c"></span>
+          </div>
+          <svg class="history-network" viewBox="0 0 720 520" role="presentation">
+            <defs>
+              <radialGradient id="brainGlow" cx="50%" cy="50%" r="55%">
+                <stop offset="0%" stop-color="rgba(238, 231, 212, 0.34)"/>
+                <stop offset="100%" stop-color="rgba(238, 231, 212, 0)"/>
+              </radialGradient>
+            </defs>
+            <ellipse cx="350" cy="240" rx="250" ry="145" fill="url(#brainGlow)"/>
+            <path d="M112 262c84-82 195-154 316-116 76 24 139 75 178 156" />
+            <path d="M146 330c119-49 163-141 280-149 105-7 171 44 247 127" />
+            <path d="M204 184c68 44 101 59 164 69 87 13 180 5 281-25" />
+            <path d="M262 380c65-21 111-54 172-54 78 0 138 30 220 74" />
+            <path d="M240 241c52 33 87 53 121 106 20 31 48 56 94 87" />
+            <g class="history-nodes">
+              <circle cx="118" cy="258" r="8"/>
+              <circle cx="187" cy="220" r="7"/>
+              <circle cx="266" cy="202" r="8"/>
+              <circle cx="372" cy="187" r="8"/>
+              <circle cx="470" cy="210" r="9"/>
+              <circle cx="560" cy="271" r="8"/>
+              <circle cx="646" cy="345" r="8"/>
+              <circle cx="218" cy="298" r="8"/>
+              <circle cx="312" cy="318" r="7"/>
+              <circle cx="416" cy="305" r="8"/>
+              <circle cx="509" cy="331" r="7"/>
+              <circle cx="611" cy="401" r="9"/>
+            </g>
+          </svg>
+
+          <article class="floating-note note-commit" data-depth="0.24">
+            <p class="note-label">commit a1b2c3d</p>
+            <p>Indexed new memory branch and tightened the path back to source.</p>
+            <p class="note-meta"><span>+17</span><span>-3</span></p>
+          </article>
+          <article class="floating-note note-memory" data-depth="0.18">
+            <p class="note-label">memory.md</p>
+            <p>Understanding is not accumulation, it is connection and compression.</p>
+          </article>
+          <article class="floating-note note-branch" data-depth="0.28">
+            <p class="note-label">branch: context/recursive-model</p>
+            <p>3 commits ahead of main, conflict-safe and ready to merge.</p>
+          </article>
+        </div>
+      </section>
+
+      <section id="gist" class="section intro-section">
+        <div class="section-copy">
+          <p class="eyebrow">THE GIST</p>
+          <h2>Brains are stores. Git is history.</h2>
+          <p>
+            A brain is just a directory of markdown files with enough structure to be useful:
+            names, categories, tags, paths, writable rules, and a memory index that can answer real questions.
+            Git gives those thoughts a timeline. Search gives them retrieval. The result is memory that feels inspectable instead of mystical.
+          </p>
+        </div>
+        <div class="diagram-board">
+          <div class="diagram-header">
+            <span>your mind</span>
+            <span>git history</span>
+          </div>
+          <div class="diagram-stage">
+            <div class="diagram-brain" data-depth="0.12"></div>
+            <svg viewBox="0 0 560 280" role="presentation">
+              <path d="M60 146h140c66 0 98-62 156-62h140"/>
+              <path d="M118 93h62c45 0 74 37 112 37h147"/>
+              <path d="M153 201h59c48 0 91-53 150-53h137"/>
+              <g>
+                <circle cx="89" cy="146" r="10"/>
+                <circle cx="154" cy="146" r="9"/>
+                <circle cx="246" cy="118" r="10"/>
+                <circle cx="319" cy="118" r="10"/>
+                <circle cx="393" cy="118" r="10"/>
+                <circle cx="472" cy="146" r="10"/>
+                <circle cx="215" cy="201" r="10"/>
+                <circle cx="298" cy="201" r="9"/>
+                <circle cx="375" cy="201" r="10"/>
+                <circle cx="457" cy="201" r="10"/>
+              </g>
+            </svg>
+          </div>
+        </div>
+      </section>
+
+      <section id="stores" class="section stores-section">
+        <div class="panel-stack">
+          <article class="panel">
+            <p class="eyebrow">ORGANIZATION</p>
+            <h3>Brains are not a blob.</h3>
+            <p>
+              grug gives you organizational primitives: categories, paths, tags, backlinks, and the idea of separate brains.
+              You can split research from project docs, writable memory from synced archives, or personal notes from machine-readable reference.
+            </p>
+          </article>
+          <article class="panel">
+            <p class="eyebrow">SEARCH</p>
+            <h3>Context stays queryable.</h3>
+            <p>
+              The agent can search all brains at once, read specific memories, recall a brain summary, and traverse local relationships.
+              It does not need to pretend it remembers, it can actually look.
+            </p>
+          </article>
+        </div>
+        <div class="list-column">
+          <p class="eyebrow">WHAT IT PROVIDES</p>
+          <ul class="capability-list">
+            <li><span>01</span> Local-first markdown storage with explicit brain boundaries.</li>
+            <li><span>02</span> Search over every memory, not just the one you happened to open.</li>
+            <li><span>03</span> Read, write, rename, delete, sync, and recall operations for agents.</li>
+            <li><span>04</span> A structure that survives between sessions and across machines.</li>
+          </ul>
+        </div>
+      </section>
+
+      <section id="agent" class="section agent-section">
+        <div class="section-copy wide-copy">
+          <p class="eyebrow">FOR THE AGENT</p>
+          <h2>What grug does for your agent is simple: it makes context durable.</h2>
+          <p>
+            Instead of treating every session like a reset, the agent gets a place to put facts, plans, feedback, and work products.
+            Instead of hoping the right chunk is still in the prompt window, it gets a memory system with stable paths and retrieval hooks.
+            Instead of swallowing conflicts, it can surface them and keep the trail.
+          </p>
+        </div>
+        <div class="agent-grid">
+          <article>
+            <p class="stat">01</p>
+            <h3>Write something down</h3>
+            <p>Store a memory in the primary brain or route it to a specific one.</p>
+          </article>
+          <article>
+            <p class="stat">02</p>
+            <h3>Find it later</h3>
+            <p>Search every brain, filter by category, and read the exact file you need.</p>
+          </article>
+          <article>
+            <p class="stat">03</p>
+            <h3>Keep it synchronized</h3>
+            <p>Git-backed sync keeps brains in lockstep and records what changed.</p>
+          </article>
+          <article>
+            <p class="stat">04</p>
+            <h3>Recover when reality diverges</h3>
+            <p>Conflicts get surfaced instead of silently destroying context.</p>
+          </article>
+        </div>
+      </section>
+
+      <section id="history" class="section history-section">
+        <div class="history-copy">
+          <p class="eyebrow">TIME MATTERS</p>
+          <h2>Memory gets more useful when you can trust its history.</h2>
+          <p>
+            grug keeps the operational shape of version control: sync timers, conflict files, branches, history, and the ability to inspect what changed.
+            That matters because agent memory is not just storage, it is a record of evolving understanding.
+          </p>
+        </div>
+        <div class="history-log" aria-label="Illustrative history log">
+          <div class="log-item">
+            <span class="log-dot"></span>
+            <div>
+              <p class="log-title">Commit</p>
+              <p>New memory on retrieval heuristics lands in `research/`.</p>
+            </div>
+          </div>
+          <div class="log-item">
+            <span class="log-dot"></span>
+            <div>
+              <p class="log-title">Branch</p>
+              <p>An experiment splits off without contaminating the main line.</p>
+            </div>
+          </div>
+          <div class="log-item">
+            <span class="log-dot conflict"></span>
+            <div>
+              <p class="log-title">Conflict</p>
+              <p>Two machines diverge, the conflict gets captured instead of erased.</p>
+            </div>
+          </div>
+          <div class="log-item">
+            <span class="log-dot"></span>
+            <div>
+              <p class="log-title">Recall</p>
+              <p>The agent asks for the highlights and gets the trail back.</p>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <section class="section close-section">
+        <div class="close-copy">
+          <p class="eyebrow">THE SHORT VERSION</p>
+          <h2>grug-brain is memory that behaves like infrastructure.</h2>
+          <p>
+            Local by default. Searchable. Organized. Versioned. Syncable. The agent gets a real store with real history,
+            which means context can accumulate without becoming opaque.
+          </p>
+        </div>
+        <div class="close-actions">
+          <a class="button button-primary" href="https://github.com/ryanccn/grug-brain.mcp">Go to the repository</a>
+          <a class="button button-secondary" href="https://github.com/ryanccn/grug-brain.mcp#readme">Read the README</a>
+        </div>
+      </section>
+    </main>
+  </div>
+  <script src="app.js"></script>
+</body>
+</html>
